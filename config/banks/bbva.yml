@@ -1,0 +1,61 @@
+bank_name: bbva
+parser_version: "1.0.0"
+
+# Calibrated against a real "MAESTRA PYME BBVA" statement (account 0114091108, Jun 2024).
+# NOTE: this layout differs from design-spec §10.2 placeholders. The real summary block uses
+# "Saldo de Liquidación Inicial" (not "Saldo Anterior"), prints a movement count between the
+# "Depósitos / Abonos" label and its total, and carries two balance columns (Operación +
+# Liquidación). Geometry and regexes below were measured from word coordinates (§10.3).
+
+sniff_any:                         # this layout is BBVA if any of these appear on page 1
+  - "BBVA"
+  - "BBVA BANCOMER"
+  - "MAESTRA PYME BBVA"
+
+header_fields:                     # label -> regex capturing the value(s)
+  bank_account:  'No\.?\s*de\s*Cuenta\s+([0-9]{10,})'
+  clabe:         'CLABE\s+([0-9]{18})'
+  period:        'Per[ií]odo\s+DEL\s+(\d{2}/\d{2}/\d{4})\s+AL\s+(\d{2}/\d{2}/\d{4})'
+  opening:       'Saldo\s+de\s+Liquidaci[oó]n\s+Inicial\s+([\d,]+\.\d{2})'
+  closing:       'Saldo\s+Final\s*\(\+\)\s*([\d,]+\.\d{2})'
+  total_abonos:  'Dep[oó]sitos\s*/\s*Abonos\s*\(\+\)\s+\d+\s+([\d,]+\.\d{2})'
+  total_cargos:  'Retiros\s*/\s*Cargos\s*\(-\)\s+\d+\s+([\d,]+\.\d{2})'
+  currency_usd:  'MONEDA\s+DOLARES'          # presence => USD; absence => MXN
+
+table:
+  start_marker: "Detalle de Movimientos Realizados"
+  # x-ranges in pdfplumber points, calibrated from word coordinates (§10.3)
+  columns:
+    oper_date:        [  0,  46]
+    liq_date:         [ 46,  83]
+    code:             [ 83, 109]
+    description:      [109, 358]
+    cargo:            [358, 410]
+    abono:            [410, 468]
+    saldo_operacion:  [468, 533]
+    saldo_liquidacion: [533, 605]
+  row_anchor: 'oper_date'          # a new line begins where a date appears in this column
+  date_format: "%d/%b"             # BBVA prints DD/MMM; year comes from the period
+  month_names_es: [ENE, FEB, MAR, ABR, MAY, JUN, JUL, AGO, SEP, OCT, NOV, DIC]
+
+wrapped_description: true          # continuation lines with no date append to the prior line
+reference_regex: 'Ref\.?\s*([0-9A-Za-z\-/]+)'   # references are printed inline on wrapped lines
+
+known_codes:                       # observed; used by §12.2 categorisation
+  C02: { label: "DEPOSITO EN EFECTIVO",             category: transfer_in }
+  N06: { label: "PAGO CUENTA DE TERCERO",           category: transfer_out }
+  C47: { label: "COM CHQ LIBRADOS PAGADOS",         category: bank_commission }
+  C48: { label: "IVA COM CHEQUES LIBRADOS",         category: bank_commission_iva }
+  V42: { label: "VENTAS DEBITO",                    category: pos_settlement }
+  V45: { label: "VENTAS CREDITO",                   category: pos_settlement }
+  H09: { label: "COBRO AUTOMATICO RECIBO",          category: loan_installment }
+  H86: { label: "REEMBOLSO PAGO DE CREDITO",        category: loan_reimbursement }
+  T17: { label: "SPEI ENVIADO",                     category: transfer_out }
+  T20: { label: "SPEI RECIBIDO",                    category: transfer_in }
+description_categories:            # fallback when the code is absent/unknown
+  - { match: 'I\.?V\.?A\.?',                 category: bank_commission_iva }
+  - { match: 'COMISI[OÓ]N',                  category: bank_commission }
+  - { match: 'TERMINALES PUNTO DE VENTA',    category: pos_settlement }
+  - { match: 'SPEI\s+RECIBIDO',              category: transfer_in }
+  - { match: 'SPEI\s+ENVIADO',               category: transfer_out }
+  - { match: 'DEPOSITO',                     category: transfer_in }

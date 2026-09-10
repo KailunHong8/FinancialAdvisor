@@ -1,0 +1,56 @@
+entity: "Secontrol Automatización SA de CV"
+currency: MXN
+materiality: 5000.00            # MXN, per the prototype Cover sheet
+ledger_root: "1112"            # Bancos
+ledger_rollup_accounts:        # parent rows to skip, never treated as accounts
+  - "1112-00-000-00"
+
+accounts:
+  - ledger_account: "1112-01-001-00"
+    label: "Bancomer 114091108"
+    bank: bbva
+    bank_account: "0114091108"
+    currency: MXN
+    in_scope: true
+  - ledger_account: "1112-01-002-00"
+    label: "Bancomer Cta 118892253 Ter 4396017"
+    bank: bbva
+    bank_account: "0118892253"
+    pos_terminal: "4396017"
+    currency: MXN
+    in_scope: true
+  - { ledger_account: "1112-01-003-00", bank: bbva, bank_account: "0118892717", pos_terminal: "4396025", currency: MXN, in_scope: true }
+  - { ledger_account: "1112-01-004-00", bank: bbva, bank_account: "0118893314", currency: MXN, in_scope: true }
+  - { ledger_account: "1112-01-005-00", bank: bbva, bank_account: "0192251736", currency: MXN, in_scope: true }
+  - { ledger_account: "1112-01-006-00", bank: bbva, bank_account: "0114232658", currency: MXN, in_scope: true }
+  - ledger_account: "1112-01-007-00"
+    bank: bbva
+    bank_account: "0116016731"
+    clabe: "012691001160167315"
+    currency: MXN
+    in_scope: true
+    note: >
+      Ledger label carries the CLABE tail (1160167315), not the account number.
+      Chart-of-accounts label correction pending — no dollar impact.
+  - { ledger_account: "1112-01-009-00", bank: bbva, bank_account: "0118893187", pos_terminal: "4396035", currency: MXN, in_scope: true }
+  - { ledger_account: "1112-01-011-00", bank: bbva, bank_account: "0118892830", pos_terminal: "4396028", currency: MXN, in_scope: true }
+  - { ledger_account: "1112-01-012-00", bank: bbva, bank_account: "0116016790", currency: MXN, in_scope: true }
+  - { ledger_account: "1112-01-013-00", bank: bbva, bank_account: "0118893039", pos_terminal: "4396047", currency: MXN, in_scope: true }
+  - { ledger_account: "1112-01-016-00", bank: bbva, bank_account: "0122211882", pos_terminal: "4726658", currency: MXN, in_scope: true, dormant: true }
+  - { ledger_account: "1112-01-017-00", bank: bbva, bank_account: "0120444995", pos_terminal: "4524119", currency: MXN, in_scope: true }
+  - { ledger_account: "1112-02-001-00", bank: bbva, bank_account: "0107961006", currency: USD, in_scope: true }
+
+  # out of scope — carried explicitly so the engine reports them rather than silently ignoring
+  - { ledger_account: "1112-01-008-00", in_scope: false, reason: "No statement provided (last-4 3595)." }
+  - { ledger_account: "1112-01-010-00", in_scope: false, reason: "Credit-card sub-ledger (T.C.), not a checking account." }
+  - { ledger_account: "1112-01-014-00", in_scope: false, reason: "Unnamed/unused sub-account." }
+  - { ledger_account: "1112-01-015-00", in_scope: false, reason: "Bancomer 12360601404 Tulum — no statement provided." }
+  - { ledger_account: "1112-01-018-00", in_scope: false, reason: "Unnamed/unused sub-account." }
+  - { ledger_account: "1112-01-019-00", in_scope: false, reason: "Banco Afirme — non-BBVA, out of scope in v1." }
+  - { ledger_account: "1112-02-096-00", in_scope: false, reason: "Suspense/'Complementaria' memo account, not a bank account." }
+
+# Dr accounts used by §15.5 when proposing entries. Placeholders — Kai to confirm (§19).
+charge_account_map:
+  bank_commission:      "TBD-comisiones-bancarias"
+  bank_commission_iva:  "TBD-iva-acreditable"
+  loan_installment:     "TBD-prestamos-por-pagar"

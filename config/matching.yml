@@ -1,0 +1,24 @@
+defaults:
+  date_window_days: 3
+  amount_tolerance: 0.00
+  description_min_similarity: 0.55
+  min_score_margin: 0.15          # best candidate must beat runner-up by this, else ambiguous
+  subset_sum:
+    max_pool: 24                  # candidate ledger items considered
+    max_subset_size: 4
+    require_unique_solution: true
+
+accounts:
+  # POS-terminal-heavy accounts: bank prints only a generic V42/V45 code, so description
+  # similarity is near-useless; compensate with a tight date window and zero amount tolerance.
+  "1112-01-013-00":
+    date_window_days: 1
+    amount_tolerance: 0.00
+    description_min_similarity: 0.20
+  "1112-01-002-00": { description_min_similarity: 0.20 }
+  "1112-01-003-00": { description_min_similarity: 0.20 }
+  "1112-01-009-00": { description_min_similarity: 0.20 }
+  # June 2024 showed a 9-day date-tag lag on this account's deposits.
+  "1112-01-006-00":
+    date_window_days: 10
+    description_min_similarity: 0.60

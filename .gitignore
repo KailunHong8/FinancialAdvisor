@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+*.egg-info/
+.pytest_cache/
+
+# client figures never leave the machine
+*.xlsx
+*.pdf
+!tests/fixtures/**
