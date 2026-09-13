@@ -130,7 +130,7 @@ them is by design.
 
 ## Layout
 
-`src/recon/` — `parsers/` (ledger + bank), `matching/` (passes 1-6), `reconcile/` (derive,
+`src/recon/` — `parsers/` (ledger + bank), `matching/` (passes 1-7), `reconcile/` (derive,
 invariants, anomalies, carry-forward), `output/` (workbook), `store.py`, `pipeline.py`, `cli.py`.
 `config/` holds the entity inventory, matching thresholds, and the BBVA layout template. `data/`
 is gitignored (holds the SQLite db, diagnostics, output). Client figures never enter git.

@@ -259,6 +259,10 @@ defaults:
     max_pool: 24                  # candidate ledger items considered
     max_subset_size: 4
     require_unique_solution: true
+  pos_batch:                      # corte de caja -> aggregated terminal settlement (pass 4)
+    enabled: true
+    settlement_lag_days: 3        # one-sided: settlement follows the cut. 3 covers Fri -> Mon.
+    max_bank_lines: 4             # one credit per card product; 4 sufficed for all of June 2024
 
 accounts:
   # POS-terminal-heavy accounts: bank prints only a generic V42/V45 code, so description
@@ -352,9 +356,9 @@ CREATE TABLE matches (
   period            TEXT NOT NULL,
   ledger_account    TEXT NOT NULL,
   direction         TEXT NOT NULL,
-  pass_no           INTEGER NOT NULL,        -- 1..5, the rule that made the match
-  match_method      TEXT NOT NULL,           -- exact | exact_dated | group | subset | fuzzy | manual
-  match_confidence  TEXT,                    -- NULL for passes 1–4
+  pass_no           INTEGER NOT NULL,        -- 1..6, the rule that made the match
+  match_method      TEXT NOT NULL,           -- exact | exact_dated | group | pos_batch | subset | fuzzy | manual
+  match_confidence  TEXT,                    -- NULL for passes 1–5
   ledger_amount     TEXT NOT NULL,
   bank_amount       TEXT NOT NULL,
   amount_delta      TEXT NOT NULL,           -- ledger − bank; non-zero spawns an amount_variance item
@@ -829,11 +833,12 @@ throughout, so the result is deterministic.
 | # | Pass | Rule | `match_method` |
 |---|---|---|---|
 | 1 | **exact** | same date, same amount to the cent, exactly one candidate on each side | `exact` |
-| 2 | **exact + window** | same amount to the cent, `|Δdays| ≤ date_window_days`, unique on both sides. Tie-break on smallest `|Δdays|`; still tied ⇒ ambiguous, defer to pass 6 | `exact_dated` |
+| 2 | **exact + window** | same amount to the cent, `|Δdays| ≤ date_window_days`, unique on both sides. Tie-break on smallest `|Δdays|`; still tied ⇒ ambiguous, defer to pass 7 | `exact_dated` |
 | 3 | **póliza group N:1** | group unmatched ledger rows by `(txn_date, tipo, poliza, direction)`; if a group's sum equals an unmatched bank line to the cent within the window ⇒ match the whole group | `group` |
-| 4 | **subset-sum N:1** | for each remaining bank line, search unmatched ledger items in the window for a subset summing exactly to it. Bounded: pool ≤ `max_pool`, subset ≤ `max_subset_size`, and the solution must be **unique** — two distinct qualifying subsets ⇒ no match, ambiguity recorded | `subset` |
-| 5 | **fuzzy** | `|Δamount| ≤ amount_tolerance` **and** `|Δdays| ≤ date_window_days` **and** `similarity ≥ description_min_similarity`. Score `= 0.5·amount_score + 0.2·date_score + 0.3·similarity`. Accept only if `best − runner_up ≥ min_score_margin` | `fuzzy` |
-| 6 | **classify residue** | every still-unmatched item becomes a `reconciling_item`; items that had ≥2 plausible candidates get `status='flagged'` with the candidate list in `evidence_json` | — |
+| 4 | **POS batch N:M** | POS accounts only (`pos_terminal` set), inflow only. Group unmatched ledger rows by póliza as in pass 3; match the group total against the **unique** subset (≤ `max_bank_lines`) of unmatched bank credits that carry this account's terminal id and fall `0..settlement_lag_days` **after** the cut date | `pos_batch` |
+| 5 | **subset-sum N:1** | for each remaining bank line, search unmatched ledger items in the window for a subset summing exactly to it. Bounded: pool ≤ `max_pool`, subset ≤ `max_subset_size`, and the solution must be **unique** — two distinct qualifying subsets ⇒ no match, ambiguity recorded | `subset` |
+| 6 | **fuzzy** | `|Δamount| ≤ amount_tolerance` **and** `|Δdays| ≤ date_window_days` **and** `similarity ≥ description_min_similarity`. Score `= 0.5·amount_score + 0.2·date_score + 0.3·similarity`. Accept only if `best − runner_up ≥ min_score_margin` | `fuzzy` |
+| 7 | **classify residue** | every still-unmatched item becomes a `reconciling_item`; items that had ≥2 plausible candidates get `status='flagged'` with the candidate list in `evidence_json` | — |
 
 Design notes:
 
@@ -841,20 +846,44 @@ Design notes:
   every line of a daily sales cut: `06-24` rows 216–225 are ten separate `Cargos` all with
   `Número = 135`, all dated 29/Jun, which the bank settles as a smaller number of POS batch
   lines. Grouping by póliza is the cheap, exact, explainable version of that.
-- **Pass 4 is the automation of what is already being done by hand.** The ledger workbook
+- **Pass 4 is the only N:M pass, and the terminal id is what makes it safe.** A day's *corte de
+  caja* is booked as one póliza of individual card sales but settles into the bank on a later
+  banking day as one aggregate credit per card product, so neither side's row count matches the
+  other's and passes 1–3 cannot close it. Calibrated on `1112-01-002-00` / terminal `4396017`:
+  póliza 133 (11 rows, 27-Jun, 37,284.30) arrives 28-Jun as `V45` 9,722.47 + `V42` 27,561.83.
+  Two constraints do the work. First, the bank side is filtered to credits stamped with this
+  account's terminal — BBVA prints `Ref. 14<terminal>` — and that reference, *not* the operation
+  code, is the dependable signal: on the calibration account 37 of 38 credits carry it across
+  four codes (`V42`, `V45`, `I72`, `K54`), of which only the first two are in `known_codes`, so
+  categorising by code would have skipped batches silently. Second, the lag is one-sided:
+  settlement follows the cut and never precedes it, which kills the coincidences a symmetric
+  window would admit. `settlement_lag_days: 3` because a Friday corte settles the following
+  Monday (póliza 116, 07-Jun → 10-Jun). Raising `max_bank_lines` past 4 resolved no additional
+  batch in June 2024, so the bound is free. Uniqueness is required exactly as in pass 5.
+  The match is committed — it ties to the cent — but every account with a batch also gets a
+  `pos_batch_aggregate` anomaly requesting the acquirer's settlement report, because arithmetic
+  agreement is not the same as documentary proof.
+- **Pass 4 runs after pass 3, not before pass 1.** Running it first would let it claim whole
+  pólizas before any 1:1 pass fragments them (≈50% more batches on the June data), but pass 1
+  builds its date/amount index from `L`/`B` rather than from the unmatched residue — it assumes
+  it runs first — so hoisting pass 4 above it double-books items and trips I5/I6. Placing pass 4
+  between 3 and 5 gets the protection that matters (a spurious ≤4-row subset-sum can no longer
+  break up a terminal-confirmed batch) without that precondition. Fixing pass 1 to filter on
+  `_unmatched` would unlock the reorder.
+- **Pass 5 is the automation of what is already being done by hand.** The ledger workbook
   contains three scratch sheets — `Busqueda 37879.27`, `Busqueda 4069.87`, `Busqueda 26117.44` —
   each a manual subset-sum search for a target bank amount ("Búsqueda de importe objetivo",
   "Coincidencias exactas en Cargos/Abonos: 0", "Combinaciones mostradas: 8"). The bounds and the
   uniqueness requirement exist because unbounded subset-sum over a 250-row account will find
   spurious combinations; a non-unique solution is evidence of nothing and must not become a match.
-- **Pass 5 must not silently absorb an amount difference.** If an accepted fuzzy match has
+- **Pass 6 must not silently absorb an amount difference.** If an accepted fuzzy match has
   `amount_delta ≠ 0`, the engine additionally emits a `side='amount_variance'` reconciling item
   for exactly that delta. Without this, invariant I5 stops being exactly zero and the closure
   test degrades into a tolerance check — which is precisely the weakness of the hand-built
   schedule (its own slack rows read `F249=0.37`, `G249=−0.35`). With `amount_tolerance: 0.00`
   as the default, this case does not arise at all; the rule exists so that raising the tolerance
   later stays safe.
-- **Coincidental amount collisions are what pass 6 is for.** June 2024 has three ledger amounts
+- **Coincidental amount collisions are what pass 7 is for.** June 2024 has three ledger amounts
   ($6,780.93, $14,964.00, $7,212.18) that appear in account 001's bank statement attached to
   unrelated counterparties, and the Construbasco/Arteck case where $468,750.00 in one account
   and $364,583.33 in another share both counterparties. Under this design, an amount-only
@@ -962,7 +991,7 @@ The statement is USD (`Información Financiera MONEDA DOLARES`); the ledger carr
 in the same peso column as every other. v1 does **not** translate. It reconciles the account in
 its own units, reports the variance, and raises an `anomalies` row of kind `currency_mismatch`
 stating that the variance may be FX translation rather than a reconciling difference — which is
-exactly the prototype's conclusion. Matching for this account is restricted to passes 1–4
+exactly the prototype's conclusion. Matching for this account is restricted to passes 1–5
 (exact amounts only); fuzzy matching across a currency boundary would be meaningless.
 
 ### 12.6 Structural anomalies (`anomalies.kind`)
@@ -979,6 +1008,7 @@ Detected automatically, each becoming a Tab 3 row:
 | `impossible_date` | a parsed date outside the statement/ledger period |
 | `cross_account_candidate` | best candidate for an item sits in a different account (§11.3) |
 | `stale_outstanding_item` | `periods_open ≥ 3` |
+| `pos_batch_aggregate` | one or more corte de caja pólizas were closed against aggregated terminal settlements (§11.2 pass 4). Requests the acquirer's batch report. Unlike the other kinds this is an evidence request on items that already tie to the cent, not an unresolved difference, so it is exempt from the §15.5 rule-4 block on proposed entries |
 | `annotation_conflict` | ledger column I annotation ≠ statement balance (§9.4) |
 | `unknown_ledger_account` | `1112-*` account absent from the inventory (fatal) |
 
@@ -1280,7 +1310,7 @@ passes, `validation/legacy_schedule.py` may be deleted; invariants I1–I8 take 
 | **0 · Inventory & skeleton** | `config/entities/secontrol.yml` confirmed with Kai; repo, `pyproject.toml`, `store.py` DDL, `config.py` validation, CLI skeleton | `recon init-db` creates all 8 tables; config loads and rejects an account missing `bank_account` |
 | **1a · Ledger parser** | `ledger_contpaq.py` + I1/I2/R2 | §17.1 table reproduced exactly for `06-24`; I1/I2/R2 green for `01-24`…`06-24` |
 | **1b · Bank parser** | `diagnose-statement` first, then calibrate `banks/bbva.yml`, then `bbva.py` + I3 | §17.2 balances and the five deposit/withdrawal totals reproduced; the 20 × 18,017.19 loan debits found by count |
-| **2 · Matching, single period** | passes 1–6, `derive.py`, I4–I7, `matching.yml` tuned | I4–I7 green for all 14 accounts; `closure_residual = 0.00` everywhere; `recon validate-against-schedule` passes §17.3 including the three known differences |
+| **2 · Matching, single period** | passes 1–7, `derive.py`, I4–I7, `matching.yml` tuned | I4–I7 green for all 14 accounts; `closure_residual = 0.00` everywhere; `recon validate-against-schedule` passes §17.3 including the three known differences |
 | **3 · Backfill + forward** | `carryforward.py`, I8, `recon backfill` | Jan–Jun 2024 backfilled in order, all gates green; a June deposit in transit auto-resolves in July rather than reappearing as new |
 | **4 · Workbook** | `workbook.py`, `styles.py`, `anomalies.py` | generated workbook matches the prototype's sheet/column structure; Tab 3 contains the sign-divergence, CLABE-mislabel, dormant-balance, USD and stale-item findings the pilot made by hand |
 | **5 · Exception round-trip** | `exceptions_io.py` | round-trip test in §17.4 passes; a resolution survives a full re-run |
@@ -1329,7 +1359,7 @@ Recorded so a future reader does not have to re-derive them.
 - `03-24!1112-01-016-00` has no `Total:` row at all.
 - `Busqueda 4069.87` shows the manual subset-sum workflow, and its own combination totals are
   cumulative rather than per-combination (`8,139.74`, `12,209.61` where each should be
-  `4,069.87`) — a hand-tooling bug that pass 4 removes.
+  `4,069.87`) — a hand-tooling bug that pass 5 removes.
 
 **Prototype workbook (`SECONTROL_Bank_Reconciliation_June2024_v2.xlsx`)**
 - 5 sheets; Tab 1 has 14 in-scope accounts + total + 7 out-of-scope; Tab 2 has 106 items;

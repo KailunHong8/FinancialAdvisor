@@ -7,6 +7,10 @@ defaults:
     max_pool: 24                  # candidate ledger items considered
     max_subset_size: 4
     require_unique_solution: true
+  pos_batch:                      # corte de caja -> aggregated terminal settlement (pass 4)
+    enabled: true
+    settlement_lag_days: 3        # one-sided: settlement follows the cut. 3 covers Fri -> Mon.
+    max_bank_lines: 4             # one credit per card product; 4 sufficed for all of June 2024
 
 accounts:
   # POS-terminal-heavy accounts: bank prints only a generic V42/V45 code, so description

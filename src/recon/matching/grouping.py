@@ -1,4 +1,4 @@
-"""Póliza grouping (pass 3) and bounded subset-sum (pass 4) (§11.2)."""
+"""Póliza grouping (passes 3-4) and bounded subset-sum (pass 5) (§11.2)."""
 from __future__ import annotations
 
 from decimal import Decimal

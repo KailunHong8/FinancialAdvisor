@@ -1,4 +1,4 @@
-"""Matching engine — passes 1-6 (§11.2).
+"""Matching engine — passes 1-7 (§11.2).
 
 Run per (ledger_account, direction), in order. Each pass consumes only still-unmatched items;
 a consumed item is never reconsidered. Iteration order is (txn_date, amount, sort_key)
@@ -13,6 +13,7 @@ from ..config import MatchDefaults
 from ..money import ZERO
 from .candidates import WorkItem, order, days_between, score
 from .grouping import poliza_groups, unique_subset
+from .pos_batch import carries_terminal, eligible_settlements, settlement_subset
 
 
 @dataclass
@@ -70,24 +71,27 @@ def _unmatched(items: list[WorkItem]) -> list[WorkItem]:
     return [w for w in items if not w.matched]
 
 
-def match_account(ledger: list[WorkItem], bank: list[WorkItem],
-                  mcfg: MatchDefaults, allow_fuzzy: bool = True) -> AccountMatchOutcome:
+def match_account(ledger: list[WorkItem], bank: list[WorkItem], mcfg: MatchDefaults,
+                  allow_fuzzy: bool = True,
+                  pos_terminal: str | None = None) -> AccountMatchOutcome:
     out = AccountMatchOutcome()
     for direction in ("inflow", "outflow"):
         L = order([w for w in ledger if w.direction == direction])
         B = order([w for w in bank if w.direction == direction])
-        _match_direction(L, B, mcfg, allow_fuzzy, out)
+        _match_direction(L, B, direction, mcfg, allow_fuzzy, pos_terminal, out)
     out.leftover_ledger = _unmatched(ledger)
     out.leftover_bank = _unmatched(bank)
     return out
 
 
-def _match_direction(L, B, mcfg: MatchDefaults, allow_fuzzy: bool, out: AccountMatchOutcome):
+def _match_direction(L, B, direction: str, mcfg: MatchDefaults, allow_fuzzy: bool,
+                     pos_terminal: str | None, out: AccountMatchOutcome):
     window = mcfg.date_window_days
     tol = Decimal(str(mcfg.amount_tolerance))
     min_sim = mcfg.description_min_similarity
     margin = mcfg.min_score_margin
     ss = mcfg.subset_sum
+    pb = mcfg.pos_batch
 
     # ---- Pass 1: exact (same date, same amount, unique both sides) --------
     by_key_l: dict[tuple, list[WorkItem]] = {}
@@ -115,7 +119,7 @@ def _match_direction(L, B, mcfg: MatchDefaults, allow_fuzzy: bool, out: AccountM
             d0 = days_between(lw.txn_date, cands[0].txn_date)
             d1 = days_between(lw.txn_date, cands[1].txn_date)
             if d0 == d1:
-                _flag(out, lw, cands, 2, window, margin=None)   # still tied -> defer to pass 6
+                _flag(out, lw, cands, 2, window, margin=None)   # still tied -> defer to pass 7
                 continue
             best = cands[0]
         # confirm the chosen bank is not equally claimed (unique on both sides)
@@ -139,16 +143,46 @@ def _match_direction(L, B, mcfg: MatchDefaults, allow_fuzzy: bool, out: AccountM
                         f"póliza {key[2]} group of {len(group)} sums to bank {bw.amount}")
                 break
 
-    # ---- Pass 4: subset-sum N:1 -------------------------------------------
+    # ---- Pass 4: POS batch settlement N:M ---------------------------------
+    # A corte de caja settles as several aggregate credits a day or three later, so this is the
+    # only N:M pass. It runs ahead of subset-sum so that a spurious ≤4-row combination cannot
+    # fragment a batch that the terminal reference identifies exactly (§11.2).
+    if pos_terminal and pb.enabled and direction == "inflow":
+        pos_lines = order([w for w in B if carries_terminal(w, pos_terminal)])
+        groups = poliza_groups(_unmatched(L))
+        for key in sorted(groups, key=lambda k: (k[0], str(k[2]))):
+            group = groups[key]
+            if any(w.matched for w in group):
+                continue
+            cut, poliza = key[0], key[2]
+            target = sum((w.amount for w in group), ZERO)
+            subset = settlement_subset(
+                target, eligible_settlements(pos_lines, cut, pb.settlement_lag_days),
+                pb.max_bank_lines)
+            if not subset:
+                continue
+            settled = min(w.txn_date for w in subset)
+            _commit(out, 4, "pos_batch", list(group), subset,
+                    f"POS batch: póliza {poliza} corte of {len(group)} rows on {cut:%d/%b/%Y} "
+                    f"= {len(subset)} terminal-{pos_terminal} credit(s) settled "
+                    f"{settled:%d/%b/%Y} (+{(settled - cut).days}d), {target} to the cent",
+                    extra_evidence={"pos_terminal": pos_terminal, "poliza": poliza,
+                                    "cut_date": cut.isoformat(),
+                                    "settled_date": settled.isoformat(),
+                                    "settlement_lag_days": (settled - cut).days,
+                                    "ledger_rows": len(group), "bank_lines": len(subset)},
+                    evidence_key="pos_batch")
+
+    # ---- Pass 5: subset-sum N:1 -------------------------------------------
     for bw in order(_unmatched(B)):
         pool = order(_unmatched(L))
         subset = unique_subset(bw.amount, pool, bw.txn_date, window,
                                ss.max_pool, ss.max_subset_size)
         if subset:
-            _commit(out, 4, "subset", subset, [bw],
+            _commit(out, 5, "subset", subset, [bw],
                     f"unique subset of {len(subset)} ledger rows sums to bank {bw.amount}")
 
-    # ---- Pass 5: fuzzy ----------------------------------------------------
+    # ---- Pass 6: fuzzy ----------------------------------------------------
     if allow_fuzzy:
         for lw in order(_unmatched(L)):
             scored = []
@@ -166,28 +200,29 @@ def _match_direction(L, B, mcfg: MatchDefaults, allow_fuzzy: bool, out: AccountM
             best_score, best_bw, best_sc = scored[0]
             runner = scored[1][0] if len(scored) > 1 else 0.0
             if best_score - runner >= margin:
-                _commit(out, 5, "fuzzy", [lw], [best_bw],
+                _commit(out, 6, "fuzzy", [lw], [best_bw],
                         f"fuzzy score {best_score:.3f} (Δamt {best_sc['amount_delta']}, "
                         f"{best_sc['date_delta_days']}d, sim {best_sc['similarity']})",
                         confidence=best_score, extra_evidence=best_sc)
             else:
-                _flag(out, lw, [t[1] for t in scored], 5, window, margin=margin,
+                _flag(out, lw, [t[1] for t in scored], 6, window, margin=margin,
                       scores=[t[2] for t in scored])
 
 
-def _commit(out, pass_no, method, ledger, bank, note, confidence=None, extra_evidence=None):
+def _commit(out, pass_no, method, ledger, bank, note, confidence=None, extra_evidence=None,
+            evidence_key="score"):
     for w in ledger + bank:
         w.matched = True
     ev = _evidence(ledger, bank)
     if extra_evidence:
-        ev["score"] = extra_evidence
+        ev[evidence_key] = extra_evidence
     out.matches.append(MatchResult(pass_no, method, list(ledger), list(bank), note,
                                     confidence=confidence, evidence=ev))
 
 
 def _flag(out, ledger_item, bank_cands, pass_no, window, margin, scores=None):
     """Record an ambiguity so Tab 3 says *why* an item is open (§11.3). The item stays
-    unmatched; pass 6 (derive.py) turns it into a flagged reconciling item."""
+    unmatched; pass 7 (derive.py) turns it into a flagged reconciling item."""
     cand_records = []
     for i, bw in enumerate(bank_cands):
         sc = scores[i] if scores else score(ledger_item, bw, window)

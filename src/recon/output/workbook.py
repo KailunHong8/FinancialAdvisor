@@ -14,6 +14,11 @@ from . import styles as st
 
 MONEY_COLS_TAB1 = "CDEFGHIJKL"
 
+# §15.5 rule 4 blocks proposed entries on any account carrying an unresolved anomaly. A
+# pos_batch_aggregate row is a request for supporting documents on an item that already ties to
+# the cent, not an unresolved discrepancy, so it must not suppress that account's other entries.
+NON_BLOCKING_ANOMALIES = ("pos_batch_aggregate",)
+
 
 def _num(v):
     return Decimal(v) if v not in (None, "") else None
@@ -81,12 +86,19 @@ def _lead_paragraph(conn, rr, r1) -> str:
     if r1:
         bits.append("Opening variances remain on: "
                     + ", ".join(f"{r.ledger_account} ({r.detail.split('=')[-1]})" for r in r1) + ".")
-    n_anom = len(rr.anomalies)
-    if n_anom:
-        kinds = sorted({a["kind"] for a in rr.anomalies})
-        bits.append(f"{n_anom} structural anomalies flagged for investigation ({', '.join(kinds)}).")
+    # POS batch rows are counted separately: they are evidence requests on matched items, and
+    # folding them into the anomaly count would overstate what failed to reconcile.
+    pos = [a for a in rr.anomalies if a["kind"] in NON_BLOCKING_ANOMALIES]
+    other = [a for a in rr.anomalies if a["kind"] not in NON_BLOCKING_ANOMALIES]
+    if other:
+        kinds = sorted({a["kind"] for a in other})
+        bits.append(f"{len(other)} structural anomalies flagged for investigation "
+                    f"({', '.join(kinds)}).")
     if not bits:
         bits.append("All in-scope accounts with a statement reconciled to a zero closure residual.")
+    if pos:
+        bits.append(f"{len(pos)} account(s) had corte de caja batches matched against aggregated "
+                    f"POS terminal settlements; acquirer batch reports are requested in sheet 3.")
     return " ".join(bits)
 
 
@@ -327,8 +339,9 @@ def _entries(ws, conn, config: Config, period) -> None:
         "SELECT DISTINCT ledger_account FROM reconciling_items WHERE entity=? AND period=? "
         "AND status='flagged'", (entity, period)).fetchall()}
     blocked |= {r["ledger_account"] for r in conn.execute(
-        "SELECT DISTINCT ledger_account FROM anomalies WHERE period=? AND ledger_account IS NOT NULL",
-        (period,)).fetchall()}
+        "SELECT DISTINCT ledger_account FROM anomalies WHERE period=? AND ledger_account IS NOT NULL "
+        f"AND kind NOT IN ({','.join('?' * len(NON_BLOCKING_ANOMALIES))})",
+        (period, *NON_BLOCKING_ANOMALIES)).fetchall()}
 
     items = conn.execute(
         "SELECT * FROM reconciling_items WHERE entity=? AND period=? AND side='bank_unbooked' "

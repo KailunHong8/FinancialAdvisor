@@ -53,29 +53,29 @@ def test_pass3_poliza_group():
     assert len(m) == 1 and len(m[0].ledger) == 2
 
 
-def test_pass4_subset_unique():
+def test_pass5_subset_unique():
     ledgers = [L(1, 10, 300, poliza="1"), L(2, 10, 250, poliza="2")]
     out = match_account(ledgers, [B(1, 10, 550)], cfg())
-    assert any(m.pass_no == 4 for m in out.matches)
+    assert any(m.pass_no == 5 for m in out.matches)
 
 
-def test_pass4_subset_rejects_non_unique():
+def test_pass5_subset_rejects_non_unique():
     # two distinct subsets sum to 500 ({100,400},{200,300}); no single item is 500, so passes 1-3
     # cannot consume them => subset-sum must reject the ambiguity, all 4 stay leftover (§11.2)
     ledgers = [L(1, 10, 100, poliza="1"), L(2, 10, 400, poliza="2"),
                L(3, 10, 200, poliza="3"), L(4, 10, 300, poliza="4")]
     out = match_account(ledgers, [B(1, 10, 500)], cfg())
-    assert not any(m.pass_no == 4 for m in out.matches)
+    assert not any(m.pass_no == 5 for m in out.matches)
     assert len(out.leftover_ledger) == 4
 
 
-def test_pass5_fuzzy_unique():
-    # amounts differ within tolerance so passes 1-4 (exact) cannot fire; fuzzy resolves on
+def test_pass6_fuzzy_unique():
+    # amounts differ within tolerance so passes 1-5 (exact) cannot fire; fuzzy resolves on
     # description similarity + date proximity
     c = cfg(amount_tolerance=Decimal("3.00"))
     out = match_account([L(1, 10, 500, concepto="ACME CORP SA")],
                         [B(1, 11, 498, desc="SPEI ACME CORP SA DE CV")], c)
-    assert any(m.pass_no == 5 for m in out.matches)
+    assert any(m.pass_no == 6 for m in out.matches)
 
 
 def test_coincidental_amount_collision_flagged():

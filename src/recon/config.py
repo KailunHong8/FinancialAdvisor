@@ -65,12 +65,21 @@ class SubsetSum(BaseModel):
     require_unique_solution: bool = True
 
 
+class PosBatch(BaseModel):
+    enabled: bool = True
+    # Settlement follows the cut, never precedes it, so this window is one-sided. 3 days because
+    # a Friday corte settles the following Monday (póliza 116, 07-Jun-2024 -> 10-Jun-2024).
+    settlement_lag_days: int = 3
+    max_bank_lines: int = 4
+
+
 class MatchDefaults(BaseModel):
     date_window_days: int = 3
     amount_tolerance: Decimal = Decimal("0.00")
     description_min_similarity: float = 0.55
     min_score_margin: float = 0.15
     subset_sum: SubsetSum = Field(default_factory=SubsetSum)
+    pos_batch: PosBatch = Field(default_factory=PosBatch)
 
 
 class MatchingConfig(BaseModel):

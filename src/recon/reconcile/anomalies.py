@@ -94,6 +94,31 @@ def detect_account_anomalies(entity: str, period: str, acct: Account,
     return found
 
 
+def detect_pos_batch_evidence(period: str, acct: Account, outcome) -> list[dict]:
+    """pos_batch_aggregate: one evidence request per account per period (§11.2 pass 4).
+
+    The aggregate matches tie to the cent and are terminal-stamped, so they are committed as
+    matches rather than left to clutter Tab 2. This row exists so the workpaper still asks the
+    acquirer for the batch report instead of accepting arithmetic agreement as proof.
+    """
+    batches = [m for m in outcome.matches if m.method == "pos_batch"]
+    if not batches:
+        return []
+    detail = "; ".join(
+        f"póliza {m.evidence['pos_batch']['poliza']} ({len(m.ledger)} rows, "
+        f"{m.ledger[0].txn_date:%d-%b} {m.ledger_amount}) = {len(m.bank)} credit(s) on "
+        f"{m.bank[0].txn_date:%d-%b}" for m in batches)
+    total = sum((m.ledger_amount for m in batches), ZERO)
+    return [{"id": _aid(period, acct.ledger_account, "pos_batch_aggregate"), "period": period,
+             "ledger_account": acct.ledger_account, "kind": "pos_batch_aggregate",
+             "amount": str(q(total)),
+             "detail": f"{len(batches)} corte de caja batch(es) matched in aggregate against "
+                       f"terminal {acct.pos_terminal} settlement credits: {detail}",
+             "docs_needed": f"Acquirer settlement/batch report for terminal {acct.pos_terminal} "
+                            f"covering the listed cut dates, to confirm the aggregation.",
+             "conclusion": None}]
+
+
 def detect_cross_account(entity: str, period: str, all_leftovers: list[tuple]) -> list[dict]:
     """cross_account_candidate: an unmatched ledger item whose best amount+description match sits
     in a different account (§11.3). all_leftovers: list of (ledger_account, item)."""

@@ -23,7 +23,8 @@ from .matching.candidates import ledger_item, bank_item
 from .matching.engine import match_account, AccountMatchOutcome
 from .reconcile.derive import derive_account, DerivedAccountPeriod, DerivedItem
 from .reconcile import invariants as inv
-from .reconcile.anomalies import detect_account_anomalies, detect_cross_account
+from .reconcile.anomalies import (detect_account_anomalies, detect_cross_account,
+                                 detect_pos_batch_evidence)
 from .reconcile.carryforward import item_lifecycle, finalize_carryforward
 from . import store
 from .sources.local import LocalFolderSource
@@ -157,9 +158,10 @@ def run_period(conn, config: Config, root: str, period: str,
                 bid = bank_txn_id(entity, stmt.bank_account, stmt.source_sha256, l.line_no)
                 bi.append(bank_item(l, bid))
         mcfg = config.matching.for_account(acct.ledger_account)
-        allow_fuzzy = acct.currency == config.entity.currency  # USD: passes 1-4 only (§12.5)
+        allow_fuzzy = acct.currency == config.entity.currency  # USD: passes 1-5 only (§12.5)
         if stmt is not None:
-            outcome = match_account(li, bi, mcfg, allow_fuzzy=allow_fuzzy)
+            outcome = match_account(li, bi, mcfg, allow_fuzzy=allow_fuzzy,
+                                    pos_terminal=acct.pos_terminal)
         else:
             # No statement for this in-scope account: report balances and a note, but do not
             # dump every ledger row as an "outstanding" item — that is not a reconciling finding.
@@ -169,6 +171,7 @@ def run_period(conn, config: Config, root: str, period: str,
         if stmt is not None:
             invariants += inv.check_matching(acct.ledger_account, outcome, ap, len(li), len(bi))
         acct_anoms = detect_account_anomalies(entity, period, acct, block, stmt, ap, config.entity)
+        acct_anoms += detect_pos_batch_evidence(period, acct, outcome)
         anomalies += acct_anoms
         for it in items:
             all_leftover_items.append((acct.ledger_account, it))
