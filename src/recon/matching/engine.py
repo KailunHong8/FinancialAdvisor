@@ -46,8 +46,17 @@ class MatchResult:
 
 
 @dataclass
+class PosBatchCandidate:
+    id: str
+    ledger: list[WorkItem]
+    bank: list[WorkItem]
+    evidence: dict
+
+
+@dataclass
 class AccountMatchOutcome:
     matches: list[MatchResult] = field(default_factory=list)
+    pos_batch_candidates: list[PosBatchCandidate] = field(default_factory=list)
     leftover_ledger: list[WorkItem] = field(default_factory=list)
     leftover_bank: list[WorkItem] = field(default_factory=list)
     flagged: dict[str, dict] = field(default_factory=dict)   # work_item_id -> evidence (§11.3)
@@ -69,6 +78,10 @@ def _evidence(ledger: list[WorkItem], bank: list[WorkItem]) -> dict:
 
 def _unmatched(items: list[WorkItem]) -> list[WorkItem]:
     return [w for w in items if not w.matched]
+
+
+def _available(items: list[WorkItem]) -> list[WorkItem]:
+    return [w for w in items if not w.matched and not w.reserved]
 
 
 def match_account(ledger: list[WorkItem], bank: list[WorkItem], mcfg: MatchDefaults,
@@ -93,12 +106,44 @@ def _match_direction(L, B, direction: str, mcfg: MatchDefaults, allow_fuzzy: boo
     ss = mcfg.subset_sum
     pb = mcfg.pos_batch
 
+    # Review candidates reserve both sides so later passes cannot turn only part of a proven
+    # aggregate into ordinary matches. They remain unmatched and therefore appear in Tab 2.
+    if pos_terminal and pb.enabled and direction == "inflow":
+        pos_lines = order([w for w in B if carries_terminal(w, pos_terminal)])
+        groups = poliza_groups(_available(L))
+        for key in sorted(groups, key=lambda k: (k[0], str(k[2]))):
+            group = groups[key]
+            cut, poliza = key[0], key[2]
+            target = sum((w.amount for w in group), ZERO)
+            subset = settlement_subset(
+                target, eligible_settlements(pos_lines, cut, pb.settlement_lag_days),
+                pb.max_bank_lines)
+            if not subset:
+                continue
+            settled = min(w.txn_date for w in subset)
+            extra = {"pos_terminal": pos_terminal, "poliza": poliza,
+                     "cut_date": cut.isoformat(), "settled_date": settled.isoformat(),
+                     "settlement_lag_days": (settled - cut).days,
+                     "ledger_rows": len(group), "bank_lines": len(subset)}
+            if pb.disposition == "auto_match":
+                _commit(out, 4, "pos_batch", list(group), subset,
+                        f"POS batch: póliza {poliza} corte of {len(group)} rows on {cut:%d/%b/%Y} "
+                        f"= {len(subset)} terminal-{pos_terminal} credit(s)",
+                        extra_evidence=extra, evidence_key="pos_batch")
+                continue
+            candidate_id = f"POS-{group[0].id}"
+            evidence = _evidence(list(group), subset)
+            evidence["pos_batch"] = {"candidate_id": candidate_id, **extra}
+            for w in group + subset:
+                w.reserved = True
+            out.pos_batch_candidates.append(PosBatchCandidate(candidate_id, list(group), subset, evidence))
+
     # ---- Pass 1: exact (same date, same amount, unique both sides) --------
     by_key_l: dict[tuple, list[WorkItem]] = {}
     by_key_b: dict[tuple, list[WorkItem]] = {}
-    for w in L:
+    for w in _available(L):
         by_key_l.setdefault((w.txn_date, w.amount), []).append(w)
-    for w in B:
+    for w in _available(B):
         by_key_b.setdefault((w.txn_date, w.amount), []).append(w)
     for key in sorted(by_key_l, key=lambda k: (k[0], k[1])):
         ls, bs = by_key_l[key], by_key_b.get(key, [])
@@ -107,8 +152,8 @@ def _match_direction(L, B, direction: str, mcfg: MatchDefaults, allow_fuzzy: boo
                     f"exact: same date {key[0]:%d/%b/%Y}, amount {key[1]}, unique both sides")
 
     # ---- Pass 2: exact amount + date window -------------------------------
-    for lw in order(_unmatched(L)):
-        cands = [bw for bw in _unmatched(B)
+    for lw in order(_available(L)):
+        cands = [bw for bw in _available(B)
                  if bw.amount == lw.amount and days_between(lw.txn_date, bw.txn_date) <= window]
         if not cands:
             continue
@@ -123,7 +168,7 @@ def _match_direction(L, B, direction: str, mcfg: MatchDefaults, allow_fuzzy: boo
                 continue
             best = cands[0]
         # confirm the chosen bank is not equally claimed (unique on both sides)
-        rival = [ow for ow in _unmatched(L)
+        rival = [ow for ow in _available(L)
                  if ow is not lw and ow.amount == best.amount
                  and days_between(ow.txn_date, best.txn_date) < days_between(lw.txn_date, best.txn_date)]
         if rival:
@@ -133,49 +178,19 @@ def _match_direction(L, B, direction: str, mcfg: MatchDefaults, allow_fuzzy: boo
                 f"exact amount {lw.amount}, |Δ|={dd}d within {window}d window")
 
     # ---- Pass 3: póliza group N:1 -----------------------------------------
-    for key, group in poliza_groups(_unmatched(L)).items():
+    for key, group in poliza_groups(_available(L)).items():
         gsum = sum((w.amount for w in group), ZERO)
         gdate = group[0].txn_date
-        for bw in order(_unmatched(B)):
+        for bw in order(_available(B)):
             if bw.amount == gsum and days_between(gdate, bw.txn_date) <= window \
                     and all(not w.matched for w in group):
                 _commit(out, 3, "group", list(group), [bw],
                         f"póliza {key[2]} group of {len(group)} sums to bank {bw.amount}")
                 break
 
-    # ---- Pass 4: POS batch settlement N:M ---------------------------------
-    # A corte de caja settles as several aggregate credits a day or three later, so this is the
-    # only N:M pass. It runs ahead of subset-sum so that a spurious ≤4-row combination cannot
-    # fragment a batch that the terminal reference identifies exactly (§11.2).
-    if pos_terminal and pb.enabled and direction == "inflow":
-        pos_lines = order([w for w in B if carries_terminal(w, pos_terminal)])
-        groups = poliza_groups(_unmatched(L))
-        for key in sorted(groups, key=lambda k: (k[0], str(k[2]))):
-            group = groups[key]
-            if any(w.matched for w in group):
-                continue
-            cut, poliza = key[0], key[2]
-            target = sum((w.amount for w in group), ZERO)
-            subset = settlement_subset(
-                target, eligible_settlements(pos_lines, cut, pb.settlement_lag_days),
-                pb.max_bank_lines)
-            if not subset:
-                continue
-            settled = min(w.txn_date for w in subset)
-            _commit(out, 4, "pos_batch", list(group), subset,
-                    f"POS batch: póliza {poliza} corte of {len(group)} rows on {cut:%d/%b/%Y} "
-                    f"= {len(subset)} terminal-{pos_terminal} credit(s) settled "
-                    f"{settled:%d/%b/%Y} (+{(settled - cut).days}d), {target} to the cent",
-                    extra_evidence={"pos_terminal": pos_terminal, "poliza": poliza,
-                                    "cut_date": cut.isoformat(),
-                                    "settled_date": settled.isoformat(),
-                                    "settlement_lag_days": (settled - cut).days,
-                                    "ledger_rows": len(group), "bank_lines": len(subset)},
-                    evidence_key="pos_batch")
-
     # ---- Pass 5: subset-sum N:1 -------------------------------------------
-    for bw in order(_unmatched(B)):
-        pool = order(_unmatched(L))
+    for bw in order(_available(B)):
+        pool = order(_available(L))
         subset = unique_subset(bw.amount, pool, bw.txn_date, window,
                                ss.max_pool, ss.max_subset_size)
         if subset:
@@ -184,9 +199,9 @@ def _match_direction(L, B, direction: str, mcfg: MatchDefaults, allow_fuzzy: boo
 
     # ---- Pass 6: fuzzy ----------------------------------------------------
     if allow_fuzzy:
-        for lw in order(_unmatched(L)):
+        for lw in order(_available(L)):
             scored = []
-            for bw in _unmatched(B):
+            for bw in _available(B):
                 if abs(lw.amount - bw.amount) > tol:
                     continue
                 if days_between(lw.txn_date, bw.txn_date) > window:

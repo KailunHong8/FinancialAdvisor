@@ -50,10 +50,11 @@ def cmd_run(args):
     config = _config(args)
     conn = store.connect(args.db)
     store.init_db(conn)
-    rr = run_period(conn, config, _root(args), args.period, Path(args.db).parent / "diagnostics")
+    out = None if args.dry_run else _out_path(args, config, args.period)
+    rr = run_period(conn, config, _root(args), args.period, Path(args.db).parent / "diagnostics",
+                    read_back_path=out)
     if not args.dry_run:
         from .output.workbook import write_workbook
-        out = _out_path(args, config, args.period)
         write_workbook(conn, config, rr, out)
         print(f"wrote {out}")
     _print_invariants(rr)
@@ -77,10 +78,12 @@ def cmd_backfill(args):
     periods = _period_range(args.from_period, args.to_period)
     for p in periods:  # strictly ascending so carry-forward is meaningful (§16)
         print(f"=== {p} ===")
-        rr = run_period(conn, config, _root(args), p, Path(args.db).parent / "diagnostics")
+        out = None if args.dry_run else _out_path(args, config, p)
+        rr = run_period(conn, config, _root(args), p, Path(args.db).parent / "diagnostics",
+                        read_back_path=out)
         if not args.dry_run:
             from .output.workbook import write_workbook
-            write_workbook(conn, config, rr, _out_path(args, config, p))
+            write_workbook(conn, config, rr, out)
         _print_invariants(rr)
     return 0
 

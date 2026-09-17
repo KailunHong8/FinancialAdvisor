@@ -251,4 +251,8 @@ def clear_run(conn: sqlite3.Connection, entity: str, period: str) -> None:
     conn.execute("DELETE FROM bank_transactions WHERE entity=? AND period=?", (entity, period))
     conn.execute("DELETE FROM account_period WHERE entity=? AND period=?", (entity, period))
     conn.execute("DELETE FROM anomalies WHERE period=?", (period,))
+    # Current-period residue is regenerated below. Leaving it here would let an item that is
+    # matched by a later rerun continue to appear in Tab 2.
+    conn.execute("DELETE FROM reconciling_items WHERE entity=? AND period=? AND status!='resolved'",
+           (entity, period))
     conn.commit()

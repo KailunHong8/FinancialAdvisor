@@ -96,10 +96,21 @@ def _parse_statements(config: Config, source: LocalFolderSource, period: str,
 
 
 def run_period(conn, config: Config, root: str, period: str,
-               diag_root: Path, *, write_registry: bool = True) -> RunResult:
+               diag_root: Path, *, write_registry: bool = True,
+               read_back_path: str | None = None) -> RunResult:
     entity = config.entity.entity
     source = LocalFolderSource(root)
     registry = build_registry(config)
+
+    # Read hand-entered resolutions out of the existing workbook BEFORE we clear/re-derive, so
+    # item_lifecycle preserves them and carry-forward/I8 see them (§14). Without this a scheduled
+    # run would regenerate the workbook and silently drop resolutions typed since the last ingest.
+    if read_back_path and Path(read_back_path).exists():
+        from .exceptions_io import ingest_review
+        summary = ingest_review(conn, read_back_path)
+        if summary["updated"]:
+            log.info("read back %d hand-entered resolution(s) from %s",
+                     summary["updated"], read_back_path)
 
     ledger_files = source.list("ledger", "*.xlsx")
     if not ledger_files:

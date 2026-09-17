@@ -102,21 +102,27 @@ def detect_pos_batch_evidence(period: str, acct: Account, outcome) -> list[dict]
     acquirer for the batch report instead of accepting arithmetic agreement as proof.
     """
     batches = [m for m in outcome.matches if m.method == "pos_batch"]
+    batches += outcome.pos_batch_candidates
     if not batches:
         return []
-    detail = "; ".join(
-        f"póliza {m.evidence['pos_batch']['poliza']} ({len(m.ledger)} rows, "
-        f"{m.ledger[0].txn_date:%d-%b} {m.ledger_amount}) = {len(m.bank)} credit(s) on "
-        f"{m.bank[0].txn_date:%d-%b}" for m in batches)
-    total = sum((m.ledger_amount for m in batches), ZERO)
-    return [{"id": _aid(period, acct.ledger_account, "pos_batch_aggregate"), "period": period,
-             "ledger_account": acct.ledger_account, "kind": "pos_batch_aggregate",
-             "amount": str(q(total)),
-             "detail": f"{len(batches)} corte de caja batch(es) matched in aggregate against "
-                       f"terminal {acct.pos_terminal} settlement credits: {detail}",
-             "docs_needed": f"Acquirer settlement/batch report for terminal {acct.pos_terminal} "
-                            f"covering the listed cut dates, to confirm the aggregation.",
-             "conclusion": None}]
+    found = []
+    for batch in batches:
+        evidence = batch.evidence["pos_batch"]
+        candidate_id = evidence.get("candidate_id")
+        status = "review candidate" if candidate_id else "matched"
+        identifier = candidate_id or f"match-{batch.ledger[0].id}"
+        found.append({"id": _aid(period, acct.ledger_account, "pos_batch_aggregate", identifier),
+                      "period": period, "ledger_account": acct.ledger_account,
+                      "kind": "pos_batch_aggregate", "amount": str(q(sum(
+                          (w.amount for w in batch.ledger), ZERO))),
+                      "detail": f"{status} {identifier}: póliza {evidence['poliza']} "
+                                f"({len(batch.ledger)} rows, {batch.ledger[0].txn_date:%d-%b}) = "
+                                f"{len(batch.bank)} terminal {acct.pos_terminal} credit(s) on "
+                                f"{batch.bank[0].txn_date:%d-%b}",
+                      "docs_needed": f"Acquirer settlement/batch report for terminal "
+                                     f"{acct.pos_terminal}, póliza {evidence['poliza']}.",
+                      "conclusion": None})
+    return found
 
 
 def detect_cross_account(entity: str, period: str, all_leftovers: list[tuple]) -> list[dict]:

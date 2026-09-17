@@ -1,5 +1,6 @@
 """Exception round-trip (§14): write register -> edit -> ingest-review -> resolution attaches;
 unknown id warns/skips; 'Yes' without text rejected; idempotent."""
+import pytest
 from openpyxl import Workbook
 
 from recon.exceptions_io import ingest_review
@@ -67,3 +68,26 @@ def test_idempotent(memdb, tmp_path):
     ingest_review(memdb, path)
     after = memdb.execute("SELECT resolution FROM reconciling_items WHERE id='ITEMZ'").fetchone()["resolution"]
     assert before == after
+
+
+def test_run_reads_back_before_regenerating(memdb, config, tmp_path, monkeypatch):
+    """A scheduled run must ingest hand-entered resolutions from the existing workbook BEFORE it
+    re-derives, so they are not silently overwritten (§14). Uses a stubbed ingest + no ledger, so
+    the run aborts right after the read-back — proving the read-back is wired ahead of it."""
+    import recon.exceptions_io as eio
+    from recon.pipeline import run_period, RunError
+
+    seen = {}
+
+    def fake_ingest(conn, path):
+        seen["path"] = path
+        return {"updated": 1, "skipped_unknown": 0, "rejected": 0}
+
+    monkeypatch.setattr(eio, "ingest_review", fake_ingest)
+
+    existing = tmp_path / "wb.xlsx"
+    existing.write_bytes(b"x")  # only needs to exist; ingest is stubbed
+    with pytest.raises(RunError):  # no ledger under root -> aborts, but only after read-back
+        run_period(memdb, config, str(tmp_path), "2024-06", tmp_path / "diag",
+                   read_back_path=str(existing))
+    assert seen["path"] == str(existing)

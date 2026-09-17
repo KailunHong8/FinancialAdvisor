@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -67,6 +68,7 @@ class SubsetSum(BaseModel):
 
 class PosBatch(BaseModel):
     enabled: bool = True
+    disposition: Literal["auto_match", "review"] = "review"
     # Settlement follows the cut, never precedes it, so this window is one-sided. 3 days because
     # a Friday corte settles the following Monday (póliza 116, 07-Jun-2024 -> 10-Jun-2024).
     settlement_lag_days: int = 3

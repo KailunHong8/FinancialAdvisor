@@ -9,6 +9,7 @@ defaults:
     require_unique_solution: true
   pos_batch:                      # corte de caja -> aggregated terminal settlement (pass 4)
     enabled: true
+    disposition: review            # keep identified batch members open for reviewer confirmation
     settlement_lag_days: 3        # one-sided: settlement follows the cut. 3 covers Fri -> Mon.
     max_bank_lines: 4             # one credit per card product; 4 sufficed for all of June 2024
 

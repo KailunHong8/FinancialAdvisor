@@ -20,6 +20,7 @@ class WorkItem:
     sort_key: int        # ledger row_no or bank line_no — for deterministic ordering
     source: object       # LedgerTransaction | StatementLine, for evidence
     matched: bool = False
+    reserved: bool = False
 
 
 def ledger_item(t: LedgerTransaction) -> WorkItem:

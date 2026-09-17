@@ -87,6 +87,20 @@ def derive_account(entity: str, period: str, acct: Account, block: LedgerAccount
                    stmt: BankStatement | None, outcome: AccountMatchOutcome,
                    bank_cfg: BankConfig | None) -> tuple[DerivedAccountPeriod, list[DerivedItem]]:
     items: list[DerivedItem] = []
+    batch_by_member = {
+        w.id: candidate
+        for candidate in outcome.pos_batch_candidates
+        for w in candidate.ledger + candidate.bank
+    }
+
+    def evidence_for(w, default: dict) -> dict:
+        candidate = batch_by_member.get(w.id)
+        if candidate is None:
+            return default
+        batch = candidate.evidence["pos_batch"]
+        return {**default, "pos_batch_candidate": {
+            "id": candidate.id, "poliza": batch["poliza"],
+            "ledger_rows": batch["ledger_rows"], "bank_lines": batch["bank_lines"]}}
 
     # ---- reconciling items from leftovers (pass 6 residue) ----------------
     for w in outcome.leftover_ledger:
@@ -94,7 +108,8 @@ def derive_account(entity: str, period: str, acct: Account, block: LedgerAccount
         flagged = w.id in outcome.flagged
         side = "ledger_outstanding"
         category = "deposit_in_transit" if w.direction == "inflow" else "outstanding_payment"
-        ev = outcome.flagged.get(w.id, {"ledger_row": t.row_no, "concepto": (t.concepto or "").strip()})
+        ev = evidence_for(w, outcome.flagged.get(
+            w.id, {"ledger_row": t.row_no, "concepto": (t.concepto or "").strip()}))
         items.append(_mk_item(
             entity, acct, period, side, w.direction, category, w.amount,
             t.txn_date.isoformat(), (t.concepto or "").strip(),
@@ -104,8 +119,9 @@ def derive_account(entity: str, period: str, acct: Account, block: LedgerAccount
         l = w.source
         flagged = w.id in outcome.flagged
         category = categorize_bank(l, bank_cfg) if bank_cfg else "uncategorized"
-        ev = outcome.flagged.get(w.id, {"line_no": l.line_no, "description": l.description,
-                                        "code": l.code, "reference": l.reference})
+        ev = evidence_for(w, outcome.flagged.get(
+            w.id, {"line_no": l.line_no, "description": l.description,
+                   "code": l.code, "reference": l.reference}))
         items.append(_mk_item(
             entity, acct, period, "bank_unbooked", w.direction, category, w.amount,
             l.oper_date.isoformat(), l.description,

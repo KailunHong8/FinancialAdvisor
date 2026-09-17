@@ -199,7 +199,7 @@ def _items(ws, conn, entity, period) -> None:
     ws["A1"].font = st.TITLE_FONT
     headers = ["item_id", "Ledger Acct", "Item Type", "Date", "Amount",
                "Description / Supporting Evidence", "Side", "Clearance", "Bank verification",
-               "Verification detail", "Material?", "Periods open"]
+               "Verification detail", "Material?", "Periods open", "POS Batch Candidate"]
     hrow = 3
     for c, h in enumerate(headers, start=1):
         ws.cell(hrow, c, h)
@@ -227,14 +227,22 @@ def _items(ws, conn, entity, period) -> None:
         ws.cell(r, 10, it["source_ref"])
         ws.cell(r, 11, "Material" if abs(Decimal(it["amount"])) >= _materiality(conn) else "")
         ws.cell(r, 12, it["periods_open"])
+        ws.cell(r, 13, _pos_batch_candidate_id(it))
         ws.cell(r, 6).alignment = st.WRAP
         r += 1
     ws.freeze_panes = f"A{hrow + 1}"
     ws.column_dimensions["A"].hidden = True
     if r > hrow + 1:
-        ws.auto_filter.ref = f"A{hrow}:L{r - 1}"
+        ws.auto_filter.ref = f"A{hrow}:M{r - 1}"
     st.autosize(ws, {1: 18, 2: 16, 3: 22, 4: 13, 5: 14, 6: 50, 7: 8, 8: 12, 9: 30, 10: 22,
-                     11: 10, 12: 12})
+                     11: 10, 12: 12, 13: 24})
+
+
+def _pos_batch_candidate_id(it) -> str:
+    try:
+        return json.loads(it["evidence_json"]).get("pos_batch_candidate", {}).get("id", "")
+    except (TypeError, json.JSONDecodeError):
+        return ""
 
 
 def _bank_verification(it) -> str:
