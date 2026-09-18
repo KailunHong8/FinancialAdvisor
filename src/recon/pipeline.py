@@ -170,14 +170,14 @@ def run_period(conn, config: Config, root: str, period: str,
                 bi.append(bank_item(l, bid))
         mcfg = config.matching.for_account(acct.ledger_account)
         allow_fuzzy = acct.currency == config.entity.currency  # USD: passes 1-5 only (§12.5)
+        bank_cfg = config.bank(acct.bank) if acct.bank else None
         if stmt is not None:
             outcome = match_account(li, bi, mcfg, allow_fuzzy=allow_fuzzy,
-                                    pos_terminal=acct.pos_terminal)
+                                    pos_terminal=acct.pos_terminal, bank_cfg=bank_cfg)
         else:
             # No statement for this in-scope account: report balances and a note, but do not
             # dump every ledger row as an "outstanding" item — that is not a reconciling finding.
             outcome = AccountMatchOutcome()
-        bank_cfg = config.bank(acct.bank) if acct.bank else None
         ap, items = derive_account(entity, period, acct, block, stmt, outcome, bank_cfg)
         if stmt is not None:
             invariants += inv.check_matching(acct.ledger_account, outcome, ap, len(li), len(bi))
@@ -199,8 +199,7 @@ def run_period(conn, config: Config, root: str, period: str,
              views, anomalies, stmts)
 
     # carry-forward + I8 (runs after items are persisted with their advanced periods_open)
-    current_ids = {it.id for v in views for it in v.items if it.status != "resolved"}
-    cf_anoms, i8 = finalize_carryforward(conn, entity, period, current_ids)
+    cf_anoms, i8 = finalize_carryforward(conn, entity, period, run_id)
     invariants.append(i8)
     for a in cf_anoms:
         store.insert_anomaly(conn, {

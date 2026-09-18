@@ -8,12 +8,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
+import re
 
-from ..config import MatchDefaults
+from ..config import BankConfig, MatchDefaults
 from ..money import ZERO
 from .candidates import WorkItem, order, days_between, score
 from .grouping import poliza_groups, unique_subset
-from .pos_batch import carries_terminal, eligible_settlements, settlement_subset
+from .pos_batch import (carries_terminal, combined_corte_settlement, eligible_settlements,
+                        settlement_subset)
 
 
 @dataclass
@@ -86,19 +88,21 @@ def _available(items: list[WorkItem]) -> list[WorkItem]:
 
 def match_account(ledger: list[WorkItem], bank: list[WorkItem], mcfg: MatchDefaults,
                   allow_fuzzy: bool = True,
-                  pos_terminal: str | None = None) -> AccountMatchOutcome:
+                  pos_terminal: str | None = None,
+                  bank_cfg: BankConfig | None = None) -> AccountMatchOutcome:
     out = AccountMatchOutcome()
     for direction in ("inflow", "outflow"):
         L = order([w for w in ledger if w.direction == direction])
         B = order([w for w in bank if w.direction == direction])
-        _match_direction(L, B, direction, mcfg, allow_fuzzy, pos_terminal, out)
+        _match_direction(L, B, direction, mcfg, allow_fuzzy, pos_terminal, bank_cfg, out)
     out.leftover_ledger = _unmatched(ledger)
     out.leftover_bank = _unmatched(bank)
     return out
 
 
 def _match_direction(L, B, direction: str, mcfg: MatchDefaults, allow_fuzzy: bool,
-                     pos_terminal: str | None, out: AccountMatchOutcome):
+                     pos_terminal: str | None, bank_cfg: BankConfig | None,
+                     out: AccountMatchOutcome):
     window = mcfg.date_window_days
     tol = Decimal(str(mcfg.amount_tolerance))
     min_sim = mcfg.description_min_similarity
@@ -119,11 +123,36 @@ def _match_direction(L, B, direction: str, mcfg: MatchDefaults, allow_fuzzy: boo
                 target, eligible_settlements(pos_lines, cut, pb.settlement_lag_days),
                 pb.max_bank_lines)
             if not subset:
+                is_corte = all(re.search(r"CORTE\s+DE\s+(?:CAJA|VENTAS)", w.description,
+                                         re.IGNORECASE) for w in group)
+                solution = combined_corte_settlement(
+                    [group], eligible_settlements(pos_lines, cut, pb.settlement_lag_days),
+                    pb.max_bank_lines, amount_tolerance=pb.amount_tolerance) if is_corte else None
+                if solution is None:
+                    continue
+                selected, subset, excluded = solution
+                for w in excluded:
+                    w.reserved = True
+                settled_start = min(w.txn_date for w in subset)
+                settled_end = max(w.txn_date for w in subset)
+                extra = {"pos_terminal": pos_terminal, "poliza": poliza,
+                         "cut_date": cut.isoformat(), "settled_date": settled_end.isoformat(),
+                         "settled_start_date": settled_start.isoformat(),
+                         "settlement_lag_days": (settled_end - cut).days,
+                         "ledger_rows": len(selected), "bank_lines": len(subset),
+                         "excluded_ledger_rows": sorted(w.source.row_no for w in excluded)}
+                _commit(out, 4, "pos_batch", selected, subset,
+                        f"POS batch: póliza {poliza}, {len(selected)} ledger rows = "
+                        f"{len(subset)} terminal-{pos_terminal} credit(s); excluded rows "
+                        f"{extra['excluded_ledger_rows']}", extra_evidence=extra,
+                        evidence_key="pos_batch")
                 continue
-            settled = min(w.txn_date for w in subset)
+            settled_start = min(w.txn_date for w in subset)
+            settled_end = max(w.txn_date for w in subset)
             extra = {"pos_terminal": pos_terminal, "poliza": poliza,
-                     "cut_date": cut.isoformat(), "settled_date": settled.isoformat(),
-                     "settlement_lag_days": (settled - cut).days,
+                     "cut_date": cut.isoformat(), "settled_date": settled_end.isoformat(),
+                     "settled_start_date": settled_start.isoformat(),
+                     "settlement_lag_days": (settled_end - cut).days,
                      "ledger_rows": len(group), "bank_lines": len(subset)}
             if pb.disposition == "auto_match":
                 _commit(out, 4, "pos_batch", list(group), subset,
@@ -137,6 +166,56 @@ def _match_direction(L, B, direction: str, mcfg: MatchDefaults, allow_fuzzy: boo
             for w in group + subset:
                 w.reserved = True
             out.pos_batch_candidates.append(PosBatchCandidate(candidate_id, list(group), subset, evidence))
+
+        # Some acquirer deposits combine two adjacent daily cuts. Permit that only when one exact,
+        # unique solution exists and record any ledger rows excluded from the terminal settlement.
+        corte_groups = [(key, group) for key, group in sorted(
+            groups.items(), key=lambda entry: (entry[0][0], str(entry[0][2])))
+            if all(re.search(r"CORTE\s+DE\s+(?:CAJA|VENTAS)", w.description,
+                             re.IGNORECASE) for w in group)]
+        for index, (left_key, left_group) in enumerate(corte_groups):
+            if any(w.matched or w.reserved for w in left_group):
+                continue
+            for right_key, right_group in corte_groups[index + 1:]:
+                day_gap = (right_key[0] - left_key[0]).days
+                if day_gap > 1:
+                    break
+                if any(w.matched or w.reserved for w in right_group):
+                    continue
+                eligible = eligible_settlements(pos_lines, right_key[0], pb.settlement_lag_days)
+                solution = combined_corte_settlement(
+                    [left_group, right_group], eligible, pb.max_bank_lines,
+                    amount_tolerance=pb.amount_tolerance)
+                if solution is None:
+                    continue
+                selected, bank_subset, excluded = solution
+                for w in excluded:
+                    w.reserved = True
+                polizas = f"{left_key[2]}+{right_key[2]}"
+                settled_start = min(w.txn_date for w in bank_subset)
+                settled_end = max(w.txn_date for w in bank_subset)
+                extra = {"pos_terminal": pos_terminal, "poliza": polizas,
+                         "source_polizas": [str(left_key[2]), str(right_key[2])],
+                         "cut_date": left_key[0].isoformat(),
+                         "last_cut_date": right_key[0].isoformat(),
+                         "settled_date": settled_end.isoformat(),
+                         "settled_start_date": settled_start.isoformat(),
+                         "settlement_lag_days": (settled_end - right_key[0]).days,
+                         "ledger_rows": len(selected), "bank_lines": len(bank_subset),
+                         "excluded_ledger_rows": sorted(w.source.row_no for w in excluded)}
+                _commit(out, 4, "pos_batch", selected, bank_subset,
+                        f"POS batch: pólizas {polizas}, {len(selected)} ledger rows = "
+                        f"{len(bank_subset)} terminal-{pos_terminal} credit(s); excluded rows "
+                        f"{extra['excluded_ledger_rows']}", extra_evidence=extra,
+                        evidence_key="pos_batch")
+                break
+
+        # An unresolved daily cut remains an accounting group. Keep its members out of generic
+        # exact/subset passes, which otherwise can combine unrelated rows across pólizas.
+        for _, group in corte_groups:
+            if not any(w.matched for w in group):
+                for w in group:
+                    w.reserved = True
 
     # ---- Pass 1: exact (same date, same amount, unique both sides) --------
     by_key_l: dict[tuple, list[WorkItem]] = {}
@@ -187,6 +266,23 @@ def _match_direction(L, B, direction: str, mcfg: MatchDefaults, allow_fuzzy: boo
                 _commit(out, 3, "group", list(group), [bw],
                         f"póliza {key[2]} group of {len(group)} sums to bank {bw.amount}")
                 break
+
+    # ---- Pass 4: monthly bank commissions 1:N -----------------------------
+    # CONTPAQi commonly books one month-end total while BBVA prints each commission and IVA
+    # separately. Restrict aggregation to an explicitly labelled ledger entry and configured
+    # commission categories; exact equality is required.
+    if direction == "outflow" and bank_cfg is not None:
+        eligible_categories = {"bank_commission", "bank_commission_iva"}
+        for lw in order(_available(L)):
+            if not re.search(r"COMISION", lw.description, re.IGNORECASE):
+                continue
+            candidates = [bw for bw in _available(B)
+                          if _bank_category(bw, bank_cfg) in eligible_categories
+                          and (bw.txn_date.year, bw.txn_date.month) ==
+                              (lw.txn_date.year, lw.txn_date.month)]
+            if candidates and sum((bw.amount for bw in candidates), ZERO) == lw.amount:
+                _commit(out, 4, "bank_charge_batch", [lw], candidates,
+                        f"month-end commission/IVA total = {len(candidates)} bank lines")
 
     # ---- Pass 5: subset-sum N:1 -------------------------------------------
     for bw in order(_available(B)):
@@ -256,3 +352,13 @@ def _flag(out, ledger_item, bank_cands, pass_no, window, margin, scores=None):
         "margin": round(top[0] - top[1], 3) if len(top) > 1 else None,
         "min_score_margin": margin,
     }
+
+
+def _bank_category(item: WorkItem, bank_cfg: BankConfig) -> str:
+    line = item.source
+    if line.code and line.code in bank_cfg.known_codes:
+        return bank_cfg.known_codes[line.code].get("category", "uncategorized")
+    for rule in bank_cfg.description_categories:
+        if re.search(rule["match"], line.description or "", re.IGNORECASE):
+            return rule["category"]
+    return "uncategorized"

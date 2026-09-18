@@ -73,6 +73,7 @@ class PosBatch(BaseModel):
     # a Friday corte settles the following Monday (póliza 116, 07-Jun-2024 -> 10-Jun-2024).
     settlement_lag_days: int = 3
     max_bank_lines: int = 4
+    amount_tolerance: Decimal = Decimal("0.00")
 
 
 class MatchDefaults(BaseModel):

@@ -115,6 +115,68 @@ def test_ambiguous_settlement_combination_rejected():
     assert len(out.leftover_ledger) == 11
 
 
+def test_adjacent_cortes_can_match_with_unique_explicit_exclusion():
+    ledger = [L(1, 19, "8400.35", poliza="126"),
+              L(2, 19, "3888.79", poliza="126"),
+              L(3, 20, "3406.68", poliza="127"),
+              L(4, 20, "388.79", poliza="127")]
+    for item in ledger:
+        item.description = f"corte de ventas del dia {item.txn_date:%d/%m/%y}"
+    bank = [B(1, 20, "2325.40"), B(2, 20, "13370.42")]
+    out = match_account(ledger, bank, cfg(disposition="auto_match"), pos_terminal=TERMINAL)
+    match = next(m for m in out.matches if m.method == "pos_batch")
+    assert match.ledger_amount == match.bank_amount == Decimal("15695.82")
+    assert match.evidence["pos_batch"]["poliza"] == "126+127"
+    assert match.evidence["pos_batch"]["excluded_ledger_rows"] == [4]
+    assert [w.amount for w in out.leftover_ledger] == [Decimal("388.79")]
+
+
+def test_single_corte_can_match_with_unique_explicit_exclusions():
+    ledger = [L(1, 25, "1218.00", poliza="131"),
+              L(2, 25, "59556.89", poliza="131"),
+              L(3, 25, "43667.13", poliza="131"),
+              L(4, 25, "12189.86", poliza="131"),
+              L(5, 25, "49391.35", poliza="131")]
+    for item in ledger:
+        item.description = "corte de ventas del dia 25/06/24"
+    bank = [B(1, 26, "1218.00", code="I72"), B(2, 26, "12189.86", code="V45"),
+            B(3, 26, "49391.35", code="V42")]
+    out = match_account(ledger, bank, cfg(disposition="auto_match"), pos_terminal=TERMINAL)
+    match = next(m for m in out.matches if m.method == "pos_batch")
+    assert match.ledger_amount == match.bank_amount == Decimal("62799.21")
+    assert match.evidence["pos_batch"]["excluded_ledger_rows"] == [2, 3]
+    assert [w.amount for w in out.leftover_ledger] == [Decimal("59556.89"), Decimal("43667.13")]
+
+
+def test_single_corte_prefers_one_exclusion_and_reports_small_delta():
+    ledger = [L(1, 25, "1218.00", poliza="131"),
+              L(2, 25, "1581.14", poliza="131"),
+              L(3, 25, "163224.09", poliza="131")]
+    for item in ledger:
+        item.description = "corte de ventas del dia 25/06/24"
+    bank = [B(1, 26, "1218.00", code="I72"), B(2, 27, "163224.02", code="V45")]
+    out = match_account(
+        ledger, bank,
+        cfg(disposition="auto_match", amount_tolerance=Decimal("0.10")),
+        pos_terminal=TERMINAL)
+    match = next(m for m in out.matches if m.method == "pos_batch")
+    assert match.evidence["pos_batch"]["excluded_ledger_rows"] == [2]
+    assert match.ledger_amount == Decimal("164442.09")
+    assert match.bank_amount == Decimal("164442.02")
+    assert match.amount_delta == Decimal("0.07")
+    assert [w.amount for w in out.leftover_ledger] == [Decimal("1581.14")]
+
+
+def test_unresolved_corte_is_not_fragmented_by_later_passes():
+    ledger = [L(1, 20, "100.00", poliza="127"), L(2, 20, "200.00", poliza="127")]
+    for item in ledger:
+        item.description = "corte de ventas del dia 20/06/24"
+    bank = [B(1, 20, "100.00")]
+    out = match_account(ledger, bank, cfg(disposition="auto_match"), pos_terminal=TERMINAL)
+    assert not out.matches
+    assert len(out.leftover_ledger) == 2 and len(out.leftover_bank) == 1
+
+
 def test_disabled_and_non_pos_accounts_are_untouched():
     lines = [B(1, 28, "9722.47", code="V45"), B(2, 28, "27561.83")]
     assert not batches(match_account(corte(), lines, cfg(enabled=False), pos_terminal=TERMINAL))

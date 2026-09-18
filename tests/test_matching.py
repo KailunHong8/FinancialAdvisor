@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 from recon.config import MatchDefaults
+from recon.config import BankConfig
 from recon.models import LedgerTransaction, StatementLine
 from recon.matching.candidates import ledger_item, bank_item
 from recon.matching.engine import match_account
@@ -33,6 +34,13 @@ def cfg(**kw):
                 description_min_similarity=0.55, min_score_margin=0.15)
     base.update(kw)
     return MatchDefaults(**base)
+
+
+def bank_cfg():
+    return BankConfig(
+        bank_name="test", parser_version="1", sniff_any=[], header_fields={}, table={},
+        known_codes={"C47": {"category": "bank_commission"},
+                     "C48": {"category": "bank_commission_iva"}})
 
 
 def test_pass1_exact():
@@ -67,6 +75,26 @@ def test_pass5_subset_rejects_non_unique():
     out = match_account(ledgers, [B(1, 10, 500)], cfg())
     assert not any(m.pass_no == 5 for m in out.matches)
     assert len(out.leftover_ledger) == 4
+
+
+def test_monthly_bank_commissions_match_one_ledger_total():
+    ledger = [L(1, 30, 120, direction="outflow", concepto="Iva y Comisiones Bancarias")]
+    bank = [B(1, 3, 100, direction="outflow", desc="COMISION"),
+            B(2, 3, 20, direction="outflow", desc="IVA COMISION")]
+    bank[0].source.__dict__["code"] = "C47"
+    bank[1].source.__dict__["code"] = "C48"
+    out = match_account(ledger, bank, cfg(), bank_cfg=bank_cfg())
+    matches = [m for m in out.matches if m.method == "bank_charge_batch"]
+    assert len(matches) == 1 and len(matches[0].bank) == 2
+    assert not out.leftover_ledger and not out.leftover_bank
+
+
+def test_monthly_bank_commissions_require_exact_total():
+    ledger = [L(1, 30, 121, direction="outflow", concepto="Iva y Comisiones Bancarias")]
+    bank = [B(1, 3, 100, direction="outflow", desc="COMISION")]
+    bank[0].source.__dict__["code"] = "C47"
+    out = match_account(ledger, bank, cfg(), bank_cfg=bank_cfg())
+    assert not any(m.method == "bank_charge_batch" for m in out.matches)
 
 
 def test_pass6_fuzzy_unique():

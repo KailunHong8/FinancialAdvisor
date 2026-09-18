@@ -58,3 +58,37 @@ def settlement_subset(target: Decimal, eligible: list[WorkItem],
                     return None
                 found = list(combo)
     return found
+
+
+def combined_corte_settlement(groups: list[list[WorkItem]], eligible: list[WorkItem],
+                              max_bank_lines: int, max_excluded_ledger: int = 2,
+                              amount_tolerance: Decimal = ZERO
+                              ) -> tuple[list[WorkItem], list[WorkItem], list[WorkItem]] | None:
+    """Find one exact settlement spanning adjacent corte groups, with explicit exclusions.
+
+    This covers acquirer deposits that combine two daily cuts while leaving a cash/other-tender
+    ledger row outside the terminal settlement. Ambiguous combinations are rejected.
+    """
+    ledger = [item for group in groups for item in group]
+    for excluded_size in range(0, min(max_excluded_ledger, len(ledger) - 1) + 1):
+        solutions: list[tuple[Decimal, list[WorkItem], list[WorkItem], list[WorkItem]]] = []
+        for excluded_tuple in combinations(ledger, excluded_size):
+            excluded = set(item.id for item in excluded_tuple)
+            selected = [item for item in ledger if item.id not in excluded]
+            if len(selected) <= len(excluded_tuple):
+                continue
+            target = sum((item.amount for item in selected), ZERO)
+            for bank_size in range(1, min(max_bank_lines, len(eligible)) + 1):
+                for bank_tuple in combinations(eligible, bank_size):
+                    delta = abs(target - sum((item.amount for item in bank_tuple), ZERO))
+                    if delta > amount_tolerance:
+                        continue
+                    solutions.append((delta, selected, list(bank_tuple), list(excluded_tuple)))
+        if solutions:
+            best_delta = min(solution[0] for solution in solutions)
+            best = [solution for solution in solutions if solution[0] == best_delta]
+            if len(best) != 1:
+                return None
+            _, selected, bank, excluded = best[0]
+            return selected, bank, excluded
+    return None

@@ -12,7 +12,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from ..config import Config
 from . import styles as st
 
-MONEY_COLS_TAB1 = "CDEFGHIJKL"
+MONEY_COLS_TAB1 = "CDEFGHIJKLMNOPQRS"
 
 # §15.5 rule 4 blocks proposed entries on any account carrying an unresolved anomaly. A
 # pos_batch_aggregate row is a request for supporting documents on an item that already ties to
@@ -108,9 +108,13 @@ def _summary(ws, conn, config: Config, rr) -> None:
     period, entity = rr.period, rr.entity
     ws["A1"] = "1. Reconciliation Summary"
     ws["A1"].font = st.TITLE_FONT
-    headers = ["Ledger Acct", "Account / Bank", "Ledger Open", "Ledger Close", "Bank Open",
-               "Bank Close", "Opening Variance", "Outstanding Deposits (ledger, not yet in bank)",
-               "Outstanding Payments (ledger, not yet in bank)", "Bank items not yet booked (net)",
+    headers = ["Ledger Acct", "Account / Bank", "Ledger Open", "Ledger Cargos",
+               "Ledger Abonos", "Ledger Close", "Bank Open", "Bank Abonos", "Bank Cargos",
+               "Bank Close", "Opening Variance", "Current Outstanding Deposits",
+               "Current Outstanding Payments", "Prior Bank Items Booked This Period (net)",
+               "Current Bank Items Not Yet Booked (net)",
+               "Prior Ledger Items Cleared This Period (net)",
+               "Matched Amount Variance (ledger-bank net)",
                "Adjusted Ledger Bal.", "Adjusted Bank Bal.",
                "Residual explained by opening variance?", "Status / Note"]
     hrow = 4
@@ -125,6 +129,20 @@ def _summary(ws, conn, config: Config, rr) -> None:
     label = {a.ledger_account: (a.label or a.ledger_account) for a in config.entity.accounts}
     is_mxn = {a.ledger_account: (a.currency == config.entity.currency)
               for a in config.entity.accounts}
+    cross_period: dict[tuple[str, str, str], Decimal] = {}
+    for row in conn.execute(
+            "SELECT ledger_account, side, direction, amount FROM reconciling_items "
+            "WHERE entity=? AND period=? AND status='cleared_prior_period'", (entity, period)):
+        key = (row["ledger_account"], row["side"], row["direction"])
+        cross_period[key] = cross_period.get(key, Decimal(0)) + Decimal(row["amount"])
+    amount_variances: dict[str, Decimal] = {}
+    for row in conn.execute(
+            "SELECT ledger_account, direction, amount FROM reconciling_items "
+            "WHERE entity=? AND period=? AND side='amount_variance'", (entity, period)):
+        sign = Decimal(1) if row["direction"] == "inflow" else Decimal(-1)
+        amount_variances[row["ledger_account"]] = (
+            amount_variances.get(row["ledger_account"], Decimal(0))
+            + sign * Decimal(row["amount"]))
 
     r = hrow + 1
     mxn_rows = []
@@ -135,19 +153,31 @@ def _summary(ws, conn, config: Config, rr) -> None:
         ws.cell(r, 1, acct.ledger_account)
         ws.cell(r, 2, label[acct.ledger_account])
         ws.cell(r, 3, float(_num(ap["ledger_open"])))
-        ws.cell(r, 4, float(_num(ap["ledger_close"])))
-        ws.cell(r, 5, float(_num(ap["bank_open"])) if ap["bank_open"] else None)
-        ws.cell(r, 6, float(_num(ap["bank_close"])) if ap["bank_close"] else None)
-        ws.cell(r, 7, f"=C{r}-E{r}")
-        ws.cell(r, 8, float(_num(ap["outstanding_inflow"])))
-        ws.cell(r, 9, float(_num(ap["outstanding_outflow"])))
+        ws.cell(r, 4, float(_num(ap["ledger_cargos"])))
+        ws.cell(r, 5, float(_num(ap["ledger_abonos"])))
+        ws.cell(r, 6, float(_num(ap["ledger_close"])))
+        ws.cell(r, 7, float(_num(ap["bank_open"])) if ap["bank_open"] else None)
+        ws.cell(r, 8, float(_num(ap["bank_abonos"])) if ap["bank_abonos"] else None)
+        ws.cell(r, 9, float(_num(ap["bank_cargos"])) if ap["bank_cargos"] else None)
+        ws.cell(r, 10, float(_num(ap["bank_close"])) if ap["bank_close"] else None)
+        ws.cell(r, 11, f"=C{r}-G{r}")
+        ledger_cross_in = cross_period.get((acct.ledger_account, "ledger_outstanding", "inflow"), Decimal(0))
+        ledger_cross_out = cross_period.get((acct.ledger_account, "ledger_outstanding", "outflow"), Decimal(0))
+        bank_cross_in = cross_period.get((acct.ledger_account, "bank_unbooked", "inflow"), Decimal(0))
+        bank_cross_out = cross_period.get((acct.ledger_account, "bank_unbooked", "outflow"), Decimal(0))
+        ws.cell(r, 12, float(_num(ap["outstanding_inflow"]) - ledger_cross_in))
+        ws.cell(r, 13, float(_num(ap["outstanding_outflow"]) - ledger_cross_out))
+        ws.cell(r, 14, float(ledger_cross_in - ledger_cross_out))
         net_unbooked = (_num(ap["unbooked_inflow"]) or Decimal(0)) - (_num(ap["unbooked_outflow"]) or Decimal(0))
-        ws.cell(r, 10, float(net_unbooked))
-        ws.cell(r, 11, f"=D{r}-H{r}+I{r}")
-        ws.cell(r, 12, f"=F{r}-J{r}")
-        ws.cell(r, 13, f'=IF(ABS((K{r}-L{r})-G{r})<=0.01,"Yes — residual = opening variance",'
+        bank_cross_net = bank_cross_in - bank_cross_out
+        ws.cell(r, 15, float(net_unbooked - bank_cross_net))
+        ws.cell(r, 16, float(bank_cross_net))
+        ws.cell(r, 17, float(amount_variances.get(acct.ledger_account, Decimal(0))))
+        ws.cell(r, 18, f"=F{r}-L{r}+M{r}-N{r}-Q{r}")
+        ws.cell(r, 19, f"=J{r}-O{r}-P{r}")
+        ws.cell(r, 20, f'=IF(ABS((R{r}-S{r})-K{r})<=0.01,"Yes — residual = opening variance",'
                        f'"No — ENGINE ERROR, see run log")')
-        ws.cell(r, 14, ap["status_note"])
+        ws.cell(r, 21, ap["status_note"])
         for col in MONEY_COLS_TAB1:
             st.money(ws[f"{col}{r}"])
         if is_mxn.get(acct.ledger_account, True):
@@ -159,11 +189,11 @@ def _summary(ws, conn, config: Config, rr) -> None:
     ws.cell(trow, 1, "TOTAL (MXN in-scope)")
     ws.cell(trow, 1).font = st.BOLD
     if mxn_rows:
-        for col in "CDEFGHIJKL":
+        for col in MONEY_COLS_TAB1:
             # sum only MXN rows
             refs = "+".join(f"{col}{rr_}" for rr_ in mxn_rows)
-            ws.cell(trow, "ABCDEFGHIJKLMN".index(col) + 1, f"={refs}")
-            st.money(ws.cell(trow, "ABCDEFGHIJKLMN".index(col) + 1))
+            ws.cell(trow, "ABCDEFGHIJKLMNOPQRSTU".index(col) + 1, f"={refs}")
+            st.money(ws.cell(trow, "ABCDEFGHIJKLMNOPQRSTU".index(col) + 1))
     r = trow + 2
 
     # out-of-scope block
@@ -182,8 +212,9 @@ def _summary(ws, conn, config: Config, rr) -> None:
         r += 1
 
     ws.freeze_panes = f"A{hrow + 1}"
-    st.autosize(ws, {1: 16, 2: 26, 3: 15, 4: 15, 5: 14, 6: 14, 7: 15, 8: 20, 9: 20,
-                     10: 18, 11: 16, 12: 16, 13: 34, 14: 34})
+    st.autosize(ws, {1: 16, 2: 26, 3: 15, 4: 15, 5: 15, 6: 15, 7: 14, 8: 15, 9: 15,
+                     10: 14, 11: 15, 12: 20, 13: 20, 14: 22, 15: 20, 16: 22, 17: 16,
+                     18: 16, 19: 16, 20: 34, 21: 34})
 
 
 # --- Sheet 2: Item Validation Report ---------------------------------------
@@ -197,55 +228,58 @@ _ITEM_TYPE = {"ledger_outstanding": "Ledger-side outstanding",
 def _items(ws, conn, entity, period) -> None:
     ws["A1"] = "2. Item Validation Report"
     ws["A1"].font = st.TITLE_FONT
-    headers = ["item_id", "Ledger Acct", "Item Type", "Date", "Amount",
+    headers = ["item_id", "Ledger Acct", "Item Type", "Direction", "Category", "Date", "Amount",
                "Description / Supporting Evidence", "Side", "Clearance", "Bank verification",
-               "Verification detail", "Material?", "Periods open", "POS Batch Candidate"]
+               "Verification detail", "Material?", "First seen period", "Periods open",
+               "Cleared in period"]
     hrow = 3
     for c, h in enumerate(headers, start=1):
         ws.cell(hrow, c, h)
     st.style_header(ws, hrow, len(headers))
     rows = conn.execute(
-        "SELECT * FROM reconciling_items WHERE entity=? AND period=? AND status!='resolved' "
-        "ORDER BY ledger_account, CAST(amount AS REAL) DESC", (entity, period)).fetchall()
+        "SELECT * FROM reconciling_items WHERE entity=? "
+        "AND (period=? OR resolved_in_period=?) "
+        "ORDER BY ledger_account, CAST(amount AS REAL) DESC", (entity, period, period)).fetchall()
     r = hrow + 1
     for it in rows:
         ws.cell(r, 1, it["id"])
         ws.cell(r, 2, it["ledger_account"])
         ws.cell(r, 3, _ITEM_TYPE.get(it["side"], it["side"]))
+        ws.cell(r, 4, it["direction"].title())
+        ws.cell(r, 5, it["category"])
         if it["txn_date"]:
             from datetime import date
             try:
                 y, m, d = (int(x) for x in it["txn_date"].split("-"))
-                c = ws.cell(r, 4, date(y, m, d)); st.date_cell(c)
+                c = ws.cell(r, 6, date(y, m, d)); st.date_cell(c)
             except Exception:
-                ws.cell(r, 4, it["txn_date"])
-        ws.cell(r, 5, float(Decimal(it["amount"]))); st.money(ws.cell(r, 5))
-        ws.cell(r, 6, it["description"])
-        ws.cell(r, 7, "Ledger" if it["side"] == "ledger_outstanding" else "Bank")
-        ws.cell(r, 8, "Outstanding" if it["status"] == "outstanding" else it["status"].title())
-        ws.cell(r, 9, _bank_verification(it))
-        ws.cell(r, 10, it["source_ref"])
-        ws.cell(r, 11, "Material" if abs(Decimal(it["amount"])) >= _materiality(conn) else "")
-        ws.cell(r, 12, it["periods_open"])
-        ws.cell(r, 13, _pos_batch_candidate_id(it))
-        ws.cell(r, 6).alignment = st.WRAP
+                ws.cell(r, 6, it["txn_date"])
+        ws.cell(r, 7, float(Decimal(it["amount"]))); st.money(ws.cell(r, 7))
+        ws.cell(r, 8, it["description"])
+        ws.cell(r, 9, "Ledger" if it["side"] == "ledger_outstanding" else "Bank")
+        clearance = ("Outstanding" if it["status"] == "outstanding"
+                 else it["status"].replace("_", " ").title())
+        ws.cell(r, 10, clearance)
+        ws.cell(r, 11, _bank_verification(it))
+        ws.cell(r, 12, it["source_ref"])
+        ws.cell(r, 13, "Material" if abs(Decimal(it["amount"])) >= _materiality(conn) else "")
+        ws.cell(r, 14, it["first_seen_period"])
+        ws.cell(r, 15, it["periods_open"])
+        ws.cell(r, 16, it["resolved_in_period"])
+        ws.cell(r, 8).alignment = st.WRAP
         r += 1
     ws.freeze_panes = f"A{hrow + 1}"
     ws.column_dimensions["A"].hidden = True
     if r > hrow + 1:
-        ws.auto_filter.ref = f"A{hrow}:M{r - 1}"
-    st.autosize(ws, {1: 18, 2: 16, 3: 22, 4: 13, 5: 14, 6: 50, 7: 8, 8: 12, 9: 30, 10: 22,
-                     11: 10, 12: 12, 13: 24})
-
-
-def _pos_batch_candidate_id(it) -> str:
-    try:
-        return json.loads(it["evidence_json"]).get("pos_batch_candidate", {}).get("id", "")
-    except (TypeError, json.JSONDecodeError):
-        return ""
+        ws.auto_filter.ref = f"A{hrow}:P{r - 1}"
+    st.autosize(ws, {1: 18, 2: 16, 3: 22, 4: 11, 5: 22, 6: 13, 7: 14, 8: 50, 9: 8,
+                     10: 12, 11: 30, 12: 22, 13: 10, 14: 15, 15: 12, 16: 15})
 
 
 def _bank_verification(it) -> str:
+    if it["resolved_by"] == "cross_period_match":
+        return ("CLEARS PRIOR-PERIOD ITEM" if it["status"] == "cleared_prior_period"
+                else "CLEARED IN SUBSEQUENT PERIOD")
     if it["status"] == "flagged":
         try:
             ev = json.loads(it["evidence_json"])

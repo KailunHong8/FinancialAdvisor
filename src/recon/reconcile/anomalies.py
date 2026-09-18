@@ -111,6 +111,9 @@ def detect_pos_batch_evidence(period: str, acct: Account, outcome) -> list[dict]
         candidate_id = evidence.get("candidate_id")
         status = "review candidate" if candidate_id else "matched"
         identifier = candidate_id or f"match-{batch.ledger[0].id}"
+        settled_dates = sorted({w.txn_date for w in batch.bank})
+        settled_label = (f"{settled_dates[0]:%d-%b}" if len(settled_dates) == 1
+                 else f"{settled_dates[0]:%d-%b} to {settled_dates[-1]:%d-%b}")
         found.append({"id": _aid(period, acct.ledger_account, "pos_batch_aggregate", identifier),
                       "period": period, "ledger_account": acct.ledger_account,
                       "kind": "pos_batch_aggregate", "amount": str(q(sum(
@@ -118,7 +121,7 @@ def detect_pos_batch_evidence(period: str, acct: Account, outcome) -> list[dict]
                       "detail": f"{status} {identifier}: póliza {evidence['poliza']} "
                                 f"({len(batch.ledger)} rows, {batch.ledger[0].txn_date:%d-%b}) = "
                                 f"{len(batch.bank)} terminal {acct.pos_terminal} credit(s) on "
-                                f"{batch.bank[0].txn_date:%d-%b}",
+                                f"{settled_label}",
                       "docs_needed": f"Acquirer settlement/batch report for terminal "
                                      f"{acct.pos_terminal}, póliza {evidence['poliza']}.",
                       "conclusion": None})

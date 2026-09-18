@@ -936,6 +936,11 @@ adjusted_bank   = bank_close   − unbooked_inflow    + unbooked_outflow
 closure_residual = (adjusted_ledger − adjusted_bank) − opening_variance
 ```
 
+The workbook also displays `ledger_cargos`, `ledger_abonos`, `bank_abonos`, and `bank_cargos`
+directly so reviewers can reproduce the movement reconciliation used by the legacy schedule.
+When prior-period items clear, their amounts are shown separately from current-period open items;
+the adjusted-balance formulas include both components.
+
 These are exactly the prototype's Tab 1 formulas (`K = D − H + I`, `L = F − J` where
 `J = unbooked_inflow − unbooked_outflow`, and `M` testing `K − L ≈ G`), restated per-item so the
 engine derives `H`, `I` and `J` itself instead of copying them from the bookkeeper's schedule.
@@ -1091,20 +1096,24 @@ claim; and a plain-language "what didn't reconcile" lead paragraph.
 ### 15.2 `1. Reconciliation Summary`
 Row 4 headers, data from row 5, exactly as the prototype:
 
-`Ledger Acct │ Account / Bank │ Ledger Open │ Ledger Close │ Bank Open │ Bank Close │
-Opening Variance │ Outstanding Deposits (ledger, not yet in bank) │ Outstanding Payments (ledger,
-not yet in bank) │ Bank items not yet booked (net) │ Adjusted Ledger Bal. │ Adjusted Bank Bal. │
+`Ledger Acct │ Account / Bank │ Ledger Open │ Ledger Cargos │ Ledger Abonos │ Ledger Close │
+Bank Open │ Bank Abonos │ Bank Cargos │ Bank Close │ Opening Variance │ Current Outstanding Deposits │
+Current Outstanding Payments │ Prior Bank Items Booked This Period (net) │
+Current Bank Items Not Yet Booked (net) │ Prior Ledger Items Cleared This Period (net) │
+Matched Amount Variance (ledger-bank net) │ Adjusted Ledger Bal. │ Adjusted Bank Bal. │
 Residual explained by opening variance? │ Status / Note`
 
-Live formulas per row `n`: `G n = Cn − En`, `K n = Dn − Hn + In`, `L n = Fn − Jn`,
-`M n = IF(ABS((Kn−Ln)−Gn) <= 0.01, "Yes — residual = opening variance", "No — ENGINE ERROR, see run log")`.
+Live formulas per row `n`: `K n = Cn − Gn`, `Q n = Fn − Ln + Mn − Nn`,
+`R n = Jn − On − Pn`, `S n = IF(ABS((Qn−Rn)−Kn) <= 0.01,
+"Yes — residual = opening variance", "No — ENGINE ERROR, see run log")`.
 Note the tolerance tightens from the prototype's `100` to `0.01` for the reason given in §12.1.
 `TOTAL` row `= SUM(...)` per column. Then the out-of-scope block:
 `Ledger Acct │ Account │ Ledger Close │ n txns │ Reason`.
 
 ### 15.3 `2. Item Validation Report`
-`item_id (hidden) │ Ledger Acct │ Item Type │ Date │ Amount │ Description / Supporting Evidence │
-Side │ Clearance │ Bank verification │ Verification detail │ Material? │ Periods open`
+`item_id (hidden) │ Ledger Acct │ Item Type │ Direction │ Category │ Date │ Amount │
+Description / Supporting Evidence │ Side │ Clearance │ Bank verification │ Verification detail │
+Material? │ First seen period │ Periods open │ Cleared in period`
 
 `Item Type` ∈ {`Ledger-side outstanding`, `Bank-side unbooked`, `Amount variance`}.
 `Bank verification` is engine-generated and factual — `CONFIRMED ABSENT FROM STATEMENT`,

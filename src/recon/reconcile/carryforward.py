@@ -7,6 +7,8 @@ auto-resolve a cleared item instead of re-reporting it as new.
 """
 from __future__ import annotations
 
+from datetime import date
+import json
 import sqlite3
 
 from .invariants import InvariantResult
@@ -51,22 +53,46 @@ def item_lifecycle(conn: sqlite3.Connection, entity: str, period: str, iid: str,
 
 
 def finalize_carryforward(conn: sqlite3.Connection, entity: str, period: str,
-                          current_ids: set[str]) -> tuple[list[dict], InvariantResult]:
+                          run_id: str) -> tuple[list[dict], InvariantResult]:
     """Run AFTER the current period's items are persisted (their rows already advanced to
-    `period`). Any prior-outstanding row still sitting at prev_period was not re-derived this
-    period, so it cleared -> mark resolved auto_carryforward. Then detect stale items and I8."""
+    `period`). Resolve only uniquely evidenced opposite-side clearances; migrate every other
+    prior item into the current period so it remains visible and ages normally."""
     prev = prev_period(period)
     anomalies: list[dict] = []
 
     prior_open = conn.execute(
-        "SELECT id FROM reconciling_items WHERE entity=? AND period=? AND status='outstanding'",
-        (entity, prev)).fetchall()
+        "SELECT * FROM reconciling_items WHERE entity=? AND period=? "
+        "AND (status='outstanding' OR (resolved_by='cross_period_match' "
+        "AND resolved_in_period=?)) "
+        "AND side IN ('ledger_outstanding','bank_unbooked')",
+        (entity, prev, period)).fetchall()
+    current_open = conn.execute(
+        "SELECT * FROM reconciling_items WHERE entity=? AND period=? AND status='outstanding' "
+        "AND side IN ('ledger_outstanding','bank_unbooked')",
+        (entity, period)).fetchall()
+
+    candidates = {row["id"]: _clearance_candidates(row, current_open) for row in prior_open}
+    claimed_by: dict[str, list[str]] = {}
+    for prior_id, rows in candidates.items():
+        for row in rows:
+            claimed_by.setdefault(row["id"], []).append(prior_id)
+
+    resolved_prior: set[str] = set()
+    for prior in prior_open:
+        matches = candidates[prior["id"]]
+        if len(matches) != 1 or len(claimed_by[matches[0]["id"]]) != 1:
+            continue
+        current = matches[0]
+        _record_cross_period_clearance(conn, prior, current, period)
+        resolved_prior.add(prior["id"])
+
     for row in prior_open:
-        if row["id"] not in current_ids:
-            conn.execute(
-                "UPDATE reconciling_items SET status='resolved', resolved_in_period=?, "
-                "resolved_by='auto_carryforward' WHERE id=? AND period=?",
-                (period, row["id"], prev))
+        if row["id"] in resolved_prior or row["status"] != "outstanding":
+            continue
+        conn.execute(
+            "UPDATE reconciling_items SET run_id=?, period=?, periods_open=periods_open+1 "
+            "WHERE id=? AND period=?",
+            (run_id, period, row["id"], prev))
 
     for row in conn.execute(
             "SELECT id, ledger_account, amount, periods_open, first_seen_period "
@@ -86,3 +112,49 @@ def finalize_carryforward(conn: sqlite3.Connection, entity: str, period: str,
                          f"prior-outstanding items unaccounted after carry-forward: {leftover}",
                          None)
     return anomalies, i8
+
+
+def _clearance_candidates(prior, current_rows) -> list:
+    opposite = {"ledger_outstanding": "bank_unbooked",
+                "bank_unbooked": "ledger_outstanding"}[prior["side"]]
+    if not prior["txn_date"]:
+        return []
+    prior_date = date.fromisoformat(prior["txn_date"])
+    found = []
+    for current in current_rows:
+        if (current["ledger_account"] != prior["ledger_account"]
+                or current["side"] != opposite
+                or current["direction"] != prior["direction"]
+                or current["amount"] != prior["amount"]
+                or not current["txn_date"]):
+            continue
+        current_date = date.fromisoformat(current["txn_date"])
+        if 0 <= (current_date - prior_date).days <= 45:
+            found.append(current)
+    return found
+
+
+def _record_cross_period_clearance(conn, prior, current, period: str) -> None:
+    evidence = {"prior_item_id": prior["id"], "prior_period": prior["period"],
+                "current_item_id": current["id"], "current_period": period,
+                "amount": current["amount"], "direction": current["direction"],
+                "rule": "unique exact amount, opposite side, within 45 days"}
+
+    def merged(row, counterpart):
+        try:
+            existing = json.loads(row["evidence_json"] or "{}")
+        except json.JSONDecodeError:
+            existing = {}
+        return json.dumps({**existing, "cross_period_clearance": {**evidence,
+                          "counterpart_item_id": counterpart["id"]}}, ensure_ascii=False)
+
+    resolution = f"Cross-period clearance against {current['id']} in {period}"
+    conn.execute(
+        "UPDATE reconciling_items SET status='resolved', resolved_in_period=?, "
+        "resolved_by='cross_period_match', resolution=?, evidence_json=? WHERE id=?",
+        (period, resolution, merged(prior, current), prior["id"]))
+    conn.execute(
+        "UPDATE reconciling_items SET status='cleared_prior_period', resolved_in_period=?, "
+        "resolved_by='cross_period_match', resolution=?, evidence_json=? WHERE id=?",
+        (period, f"Clears prior item {prior['id']} from {prior['period']}",
+         merged(current, prior), current["id"]))

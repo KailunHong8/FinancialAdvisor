@@ -46,6 +46,14 @@ known_codes:                       # observed; used by §12.2 categorisation
   N06: { label: "PAGO CUENTA DE TERCERO",           category: transfer_out }
   C47: { label: "COM CHQ LIBRADOS PAGADOS",         category: bank_commission }
   C48: { label: "IVA COM CHEQUES LIBRADOS",         category: bank_commission_iva }
+  V43: { label: "COMISION VENTAS DEBITO",           category: bank_commission }
+  V44: { label: "IVA COM VENTAS DEBITO",            category: bank_commission_iva }
+  V46: { label: "COMISION VENTAS CREDITO",          category: bank_commission }
+  V47: { label: "IVA COM VENTAS CREDITO",           category: bank_commission_iva }
+  K64: { label: "COM VTA NAL AMEX",                 category: bank_commission }
+  K65: { label: "IVA COM VTA NAL AMEX",             category: bank_commission_iva }
+  I73: { label: "COM VTAS TDC INTER",               category: bank_commission }
+  I74: { label: "IVA COM VTAS TDC INTER",           category: bank_commission_iva }
   V42: { label: "VENTAS DEBITO",                    category: pos_settlement }
   V45: { label: "VENTAS CREDITO",                   category: pos_settlement }
   H09: { label: "COBRO AUTOMATICO RECIBO",          category: loan_installment }

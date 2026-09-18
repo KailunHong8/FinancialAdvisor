@@ -144,6 +144,10 @@ def derive_account(entity: str, period: str, acct: Account, block: LedgerAccount
     outstanding_outflow = sum((w.amount for w in outcome.leftover_ledger if w.direction == "outflow"), ZERO)
     unbooked_inflow = sum((w.amount for w in outcome.leftover_bank if w.direction == "inflow"), ZERO)
     unbooked_outflow = sum((w.amount for w in outcome.leftover_bank if w.direction == "outflow"), ZERO)
+    amount_variance_net = sum((m.amount_delta for m in outcome.matches
+                               if m.ledger and m.ledger[0].direction == "inflow"), ZERO)
+    amount_variance_net -= sum((m.amount_delta for m in outcome.matches
+                                if m.ledger and m.ledger[0].direction == "outflow"), ZERO)
 
     bank_open = stmt.opening_balance if stmt else None
     bank_close = stmt.closing_balance if stmt else None
@@ -151,7 +155,8 @@ def derive_account(entity: str, period: str, acct: Account, block: LedgerAccount
     bank_cargos = stmt.total_cargos if stmt else None
     opening_variance = (block.opening - bank_open) if bank_open is not None else None
 
-    adjusted_ledger = q(block.closing - outstanding_inflow + outstanding_outflow)
+    adjusted_ledger = q(block.closing - outstanding_inflow + outstanding_outflow
+                        - amount_variance_net)
     if bank_close is not None:
         adjusted_bank = q(bank_close - unbooked_inflow + unbooked_outflow)
         closure_residual = q((adjusted_ledger - adjusted_bank) - (opening_variance or ZERO))

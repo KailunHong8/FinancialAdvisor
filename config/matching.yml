@@ -9,9 +9,10 @@ defaults:
     require_unique_solution: true
   pos_batch:                      # corte de caja -> aggregated terminal settlement (pass 4)
     enabled: true
-    disposition: review            # keep identified batch members open for reviewer confirmation
+    disposition: auto_match        # exact terminal-stamped batches match; Tab 3 still requests evidence
     settlement_lag_days: 3        # one-sided: settlement follows the cut. 3 covers Fri -> Mon.
     max_bank_lines: 4             # one credit per card product; 4 sufficed for all of June 2024
+    amount_tolerance: 0.00
 
 accounts:
   # POS-terminal-heavy accounts: bank prints only a generic V42/V45 code, so description
@@ -20,7 +21,12 @@ accounts:
     date_window_days: 1
     amount_tolerance: 0.00
     description_min_similarity: 0.20
-  "1112-01-002-00": { description_min_similarity: 0.20 }
+  "1112-01-002-00":
+    description_min_similarity: 0.20
+    # Friday 14-Jun póliza 122 settled across Monday and Tuesday; the final card-product
+    # credit landed four calendar days after the cut.
+    pos_batch: { enabled: true, disposition: auto_match, settlement_lag_days: 4, max_bank_lines: 4,
+           amount_tolerance: 0.10 }
   "1112-01-003-00": { description_min_similarity: 0.20 }
   "1112-01-009-00": { description_min_similarity: 0.20 }
   # June 2024 showed a 9-day date-tag lag on this account's deposits.
